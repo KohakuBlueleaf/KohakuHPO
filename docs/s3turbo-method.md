@@ -1,4 +1,4 @@
-# Soft-Sparse Scout TuRBO
+# S3-TuRBO: Adaptive Sparse Moves and Evidence-Gated Escape for Trust-Region Bayesian Optimization
 
 A trust-region Thompson sampler for expensive, high-dimensional optimization with heterogeneous coordinates and many far-apart good basins. It extends single-region trust-region Bayesian optimization along two independent axes (how a local step perturbs coordinates, and how the search reaches distant basins) and computes almost every internal constant from the problem itself, so the optimizer does not become a second tuning problem.
 

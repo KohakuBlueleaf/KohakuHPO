@@ -26,12 +26,12 @@ coordinates a local step moves: `dense` (all), `hard` (a Bernoulli subset, other
 (a polarized Beta weight per coordinate, containing the other two as limits), or `adaptive` (the
 soft mask with its density and polarization *learned online* from which coordinates pay off; see
 [below](#the-adaptive-soft-mask-learn-the-mask-from-the-run)). The **scout** decides how far basins
-are reached: `none`, `random` (periodic far probes), `sidecar` (a protected main path plus a
-bounded side channel into candidate regions), `switch` (sidecar plus a bounded *focus burst* that
-concentrates `q-1` slots on a promising candidate basin, the mechanism that reaches hidden narrow
-cores), or `reactive` (the *adaptive escape*: it does not predict whether a far basin exists, since a
-local search's data cannot reveal that, but reacts to evidence, keeping a small always-on base
-scout rate and tracking an escape value `E` that rises when a planted candidate region proves
+are reached, with four headline strategies: `none`, `random` (periodic far probes), `switch` (a
+protected main path plus a bounded *focus burst* that concentrates `q-1` slots on a promising
+candidate basin, the mechanism that reaches hidden narrow cores), or `reactive` (the *adaptive
+escape*: it does not predict whether a far basin exists, since a local search's data cannot reveal
+that, but reacts to evidence, keeping a small always-on base scout rate set by the `escape_k` dial and
+tracking an escape value `E` that rises when a planted candidate region proves
 spatially distinct from the incumbent and competitive, and decays when candidates prove redundant,
 so scout rate and focus-burst commitment scale with `E`). A third knob `tr_update` counts trust-region success/failure per `batch` (standard, safe)
 or per `point` (faster box collapse, wins smooth funnels). Everything else is derived from
@@ -46,44 +46,48 @@ interactive [project page](../webpage/index.html).
 
 ## Configuring: which scout to use
 
-The default is `adaptive · none · batch`: the adaptive mask self-selects (it learns its
-concentration online), the trust-region update stays `batch`, and the scout defaults to `none`
-(pure local search); the scout is an opt-in axis you add only when a local search would be
-trapped. Benchmarked against CMA-ES / GP-BO / HEBO / Sobol (d=25, q=4), S3-TuRBO with this
-default ranks first, and in the mask ablation the adaptive mask ranks best.
+The default is `adaptive · reactive · batch` with `escape_k=0.75`: the adaptive mask self-selects (it
+learns its concentration online), the trust-region update stays `batch`, and the scout is the
+evidence-gated `reactive` escape. The escape axis reduces to one derived dial, `escape_k`, which sets a
+base scout rate `rho_0 = 1/(escape_k * sqrt(d))`: large `escape_k` approaches pure-local `none`, small
+`escape_k` scouts aggressively toward `switch`. Benchmarked against CMA-ES / GP-BO / HEBO / TuRBO / Sobol,
+the default ranks *first* on the real sklearn HPO suite (avg rank 1.80 vs 2.20 for pure-local `none`) and
+second only to `none` on the smooth synthetic suite, and in the mask ablation the adaptive mask ranks best.
+The two axes are separate contributions: the soft-sparse mask carries the unimodal and simple regime on its
+own (with the scout off), and the scout is the opt-in addition for landscapes that are, or might be,
+multi-basin.
 
 | scout | use when |
 |---|---|
-| `none` (default) | the general case; pure local search is the best all-round choice (avg rank 1.12 on the general suite, vs 4.75 for switch) |
-| `reactive` (recommended adaptive) | the regime is unknown and you want an escape that is safe on both axes: the *adaptive escape* does not predict whether a far basin exists (a local search's data cannot reveal it) but reacts to evidence: it keeps a small always-on base scout rate and tracks an escape value `E` in [0,1] that rises when a planted candidate proves spatially distinct (center separated by more than the already-derived novelty radius) and competitive, and decays when candidates drift back to the incumbent basin or come back worse, scaling scout rate and focus-burst commitment by `E`. So on a single-basin landscape candidates prove redundant, `E` decays, and it behaves like `none`; on multi-basin a distinct find raises `E` and escape ramps up. It ranks *first* overall on real sklearn HPO and near pure-local on the general suite; the recommended escape when the regime is unknown |
+| `reactive` (default, `escape_k=0.75`) | the regime is unknown; a light evidence-gated escape that stays near pure-local on smooth landscapes and ramps up where structure appears. Ranks first on real sklearn HPO, second only to `none` on the smooth synthetic suite. Aliases `adaptive`, `evidence` |
+| `none` | you know the problem is unimodal or only mildly multimodal; the mask alone is the contribution and the scout has nothing to escape, so it is a small drag. Best on the smooth synthetic suite (avg rank 2.00 vs 2.25 for reactive there) |
 | `switch` | genuine multi-basin escape: many far basins, one plausibly hiding a better narrow core; the strongest raw escape and the only scout that survives the hard escape case, but it hurts on smooth tasks so it is not a good default |
-| `sidecar` | the internal base class `switch` and `reactive` inherit: a protected main path plus a bounded side channel into other basins; useful for conditional or multi-family spaces, but not a headline recommendation |
 | `random` | the most general escape but weak: a periodic uniform far probe is little more than restarting a fresh search elsewhere; a naive baseline, so it only sometimes helps and does not justify being on by default |
 
 `reactive` is the adaptive escape axis, the escape-axis analogue of the adaptive mask: it reads the
-run and spends escape budget only when the evidence justifies it. It does *not* try to predict
+run and spends escape budget in proportion to evidence. It does *not* try to predict
 whether a far basin exists (a local search's surrogate never samples the far region, so its data
-cannot reveal that); instead it keeps a small always-on base scout rate and tracks an escape value
-`E` in [0,1] that a spatially-distinct-and-competitive candidate raises and a redundant-or-worse one
-lowers, scaling scout rate and focus-burst commitment by `E`. Its one non-derived constant is that
-base rate (how much to speculatively hedge before evidence); the distinctness threshold reuses the
-already-derived novelty radius, not a tuned threshold. On the synthetic general suite the average
-ranks are `none` 1.12, `random` 2.38, `reactive` 2.50, `switch` 4.75; `reactive` sits near
-pure-local while `switch`, the raw-escape leader, is worst; on the many-basin core-hit test it hits
-the core 100% at easy/medium (tying `switch`) and 25% at hard; and on *real* sklearn HPO it ranks
-*first* overall, which is why it is the recommended escape when the regime is unknown. Aliases
-`adaptive` and `evidence` also select it.
+cannot reveal that); instead it always spends the derived base rate `rho_0` set by `escape_k` and tracks
+an escape value `E` in [0,1] that a spatially-distinct-and-competitive candidate raises and a
+redundant-or-worse one lowers, scaling scout rate and focus-burst commitment by `E`. Its one non-derived
+input is `escape_k` (the base-rate dial); the distinctness threshold reuses the already-derived novelty
+radius, not a tuned threshold. On the smooth synthetic suite the escape costs almost nothing (reactive
+sits second only to `none`); on the many-basin core-hit test a smaller `escape_k` reaches narrower far
+cores (`escape_k=0.1` matches `switch` on the hardest); and on *real* sklearn HPO it ranks *first*
+overall, which is why it is the default. Set `escape_k` in `0.5`-`1.0` (smaller for spaces likely to
+hide separated basins, larger toward pure-local for near-unimodal problems).
 
 ```python
-khpo.minimize(f, space, {"name": "s3turbo", "budget": 300}, budget=300, q=4)
+khpo.minimize(f, space, {"name": "s3turbo", "budget": 300}, budget=300, q=4)  # reactive, escape_k=0.75
+khpo.minimize(f, space, {"name": "s3turbo", "scout_strategy": "none", "budget": 300}, budget=300, q=4)  # known-simple: mask only
 ```
 
 The scout only matters when a local search would be trapped. On a barrier-separated many-basin task
 (start in a shallow near basin, deep basins far across a high plateau), an ablation over 16 seeds shows
-`switch` reaches a deep core 100% of the time (regret 0.007) while `none`, `random`, `sidecar`, and
-external methods like TuRBO stay stuck in the near basin (regret 0.50); only CMA-ES also escapes, more
-slowly. On smoother landscapes the scout contributes little, so `none` (pure local) is the default and the
-scout is opt-in; `switch` is reserved for the hidden-core case.
+`switch` reaches a deep core 100% of the time (regret 0.007) while `none`, `random`, and external methods
+like TuRBO stay stuck in the near basin (regret 0.50); only CMA-ES also escapes, more slowly. On smoother
+landscapes the scout contributes little, so setting `scout_strategy="none"` (mask only) is the right call
+when the problem is known to be simple; `switch` is reserved for the hidden-core case.
 
 The fixed masks (`dense`, `hard`, `soft`) and the named `preset`s (`balanced`, `rugged`, `smooth`,
 `soft_smooth`, `heterogeneous`, `multibasin`, each a fixed `(mask, scout, tr_update)` triple) are
@@ -93,21 +97,22 @@ a fully fixed setup is wanted.
 ## Manual control of the three axes
 
 Every axis is a plain constructor argument; a preset only fills the axes you did not set, and an
-explicit axis always wins (with nothing set, the defaults are `adaptive · none · batch`):
+explicit axis always wins (with nothing set, the defaults are `adaptive · reactive · batch` with
+`escape_k=0.75`):
 
 ```python
 # fully manual
 khpo.minimize(f, space, {
     "name": "s3turbo",
     "mask_distribution": "soft",   # dense | hard | soft | adaptive
-    "scout_strategy": "sidecar",   # none | random | sidecar | switch | reactive
+    "scout_strategy": "switch",    # none | random | switch | reactive
     "tr_update": "point",          # batch | point
     "budget": 300,
 }, budget=300, q=4)
 
-# preset as base, one axis overridden -> soft . sidecar . batch
+# preset as base, one axis overridden -> soft . switch . batch
 khpo.minimize(f, space, {"name": "s3turbo", "preset": "heterogeneous",
-                         "scout_strategy": "sidecar", "budget": 300}, budget=300, q=4)
+                         "scout_strategy": "switch", "budget": 300}, budget=300, q=4)
 ```
 
 Accepted aliases: mask `bernoulli`/`sparse` -> `hard`, `beta`/`soft_beta` -> `soft`, `none` ->
@@ -239,18 +244,21 @@ the matching fixed mask is a fine choice.
 ### Recommended settings
 
 ```python
-# default: adaptive mask, pure local search (scout is opt-in)
+# default: adaptive mask + reactive escape (regime unknown)
+{"name": "s3turbo", "mask_distribution": "adaptive", "scout_strategy": "reactive", "escape_k": 0.75, "budget": B}
+# known simple / unimodal: mask only, scout off (mask is the contribution; escape has nothing to do)
 {"name": "s3turbo", "mask_distribution": "adaptive", "scout_strategy": "none", "budget": B}
-# genuine multi-basin escape / hidden far cores: the only scout that survives the hard case
+# leaning multi-basin / multi-family: scout harder with a smaller dial
+{"name": "s3turbo", "mask_distribution": "adaptive", "scout_strategy": "reactive", "escape_k": 0.5, "budget": B}
+# hidden far cores near-certain: the strongest raw escape
 {"name": "s3turbo", "mask_distribution": "adaptive", "scout_strategy": "switch", "budget": B}
-# conditional / multi-family HPO: bounded side channel
-{"name": "s3turbo", "mask_distribution": "adaptive", "scout_strategy": "sidecar", "budget": B}
 ```
 
-Keep `tr_update="batch"` with the adaptive mask. The scout is opt-in: `none` (pure local) is the
-default and the best all-round choice. Use `switch` only when you strongly expect hidden narrow
-cores and have the budget for the focus burst; `random` is the most general escape but weak, so it
-only sometimes helps.
+Keep `tr_update="batch"` with the adaptive mask. The default `reactive` (`escape_k=0.75`) is the best
+all-round choice when the regime is unknown; set `scout_strategy="none"` when you know the problem is
+simple (the mask alone wins there), lower `escape_k` toward `0.5` when separated basins are likely, and
+use `switch` only when you strongly expect hidden narrow cores and have the budget for the focus burst.
+`random` is the most general escape but weak, so it only sometimes helps.
 
 ## Choosing q (batch size)
 

@@ -42,6 +42,9 @@ urls = { Homepage = "https://github.com/KohakuBlueleaf/KohakuHPO" }
 dev = ["pytest", "ruff", "black"]
 real = ["scikit-learn"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.setuptools]
 package-dir = { "" = "src" }
 

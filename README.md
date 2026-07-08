@@ -1,10 +1,21 @@
 # KohakuHPO
 
+### A modern, unified black-box optimization system
+
 **Sample-efficient black-box optimization** for expensive functions: hyperparameter tuning and
 anything shaped like it (simulator calibration, controller tuning, tool-parameter search). One
 ask/tell core on numpy + torch (CPU/GPU), a unified interface over every usage style, our new
 **S3-TuRBO** optimizer as the flagship, and clean from-scratch implementations of the standard
-baselines behind the same contract.
+baselines (Sobol, CMA-ES, GP-BO, HEBO, TuRBO) behind the same contract.
+
+This repository is two things at once. As a **package**, it is a practical, extensible HPO library
+you can drop into a project (Part 1 below). As a **research artifact**, it is the reference
+implementation and evaluation of **S3-TuRBO**, a new trust-region Bayesian optimizer
+([Part 2: The S3-TuRBO method](#part-2-the-s3-turbo-method)). Read whichever half you came for.
+
+---
+
+## Part 1: The KohakuHPO package
 
 ```python
 import kohakuhpo as khpo
@@ -81,39 +92,21 @@ optimizer ever needs to know.
 
 ## The optimizers
 
+Every optimizer is registered behind the same ask/tell contract, so they are interchangeable in any
+of the interfaces above.
+
 | key | method |
 |---|---|
-| `s3turbo` | **S3-TuRBO** (Soft-Sparse Scout TuRBO): trust-region batch Thompson sampling with a coordinate-mask axis and a scout/escape axis; internal constants derived from the problem |
-| `turbo` / `warped_turbo` | TuRBO with its default batch-TS acquisition (optionally HEBO-warped) |
+| `s3turbo` | **S3-TuRBO** (Soft-Sparse Scout TuRBO): trust-region batch Thompson sampling with a coordinate-mask axis and a scout/escape axis; internal constants derived from the problem. The flagship, detailed in [Part 2](#part-2-the-s3-turbo-method) |
+| `turbo` / `warped_turbo` | TuRBO with its default batch Thompson-sampling acquisition (optionally HEBO-warped) |
 | `gpbo` | global GP + log-EI (pluggable acquisition), constant-liar batching |
 | `hebo` | warped-GP + rank-combined EI/PI/UCB, from scratch |
 | `cmaes` | CMA-ES (via the `cmaes` package) |
 | `sobol`, `random` | quasirandom / uniform floors |
 
-The default is the **adaptive soft mask** with the `reactive` scout: the mask learns its own
-concentration online from which coordinates pay off, so it adapts to the landscape without being told
-the regime. In an 8-task ablation it is the best-ranked mask and every mask beats no-mask, and
-S3-TuRBO ranks first against CMA-ES, TuRBO, GP-BO, HEBO, and Sobol. The escape axis reduces to one
-dial, `escape_k`:
-
-```python
-khpo.minimize(f, space, {"name": "s3turbo", "budget": 300}, budget=300, q=4)  # reactive, escape_k=0.75
-```
-
-`reactive` spends a small derived base rate of far probes, `rho_0 = 1/(escape_k * sqrt(d))`, and lets
-the outcome of the candidate regions it has already planted modulate that spend. Large `escape_k`
-approaches pure-local `none` (right for a near-unimodal problem); small `escape_k` scouts aggressively
-toward `switch`-like escape (right for a multi-basin one). The default `escape_k=0.75` ranks first on
-the real sklearn HPO suite and second only to pure-local on the smooth synthetic suite; lower it toward
-`0.5` for spaces likely to hide separated basins (model-family search), raise it above `1` for
-near-certainly unimodal ones. Use `switch` directly when far basins are near-certain to hide a better
-core (the strongest raw escape but costly elsewhere, §7.3), or `random` for the naive periodic-probe
-baseline. The fixed masks (`dense`, `hard`, `soft`) and the named `preset`s (`balanced`, `rugged`, ...)
-are kept as static reference configurations for the ablation; pick one only when the regime is known
-and you want a fully fixed setup.
-
-See [docs/optimizers.md](docs/optimizers.md) for the catalogue, the adaptive-mask math and benchmark,
-and guidance on choosing `q`.
+The default optimizer is `s3turbo`; its configuration is covered in Part 2. See
+[docs/optimizers.md](docs/optimizers.md) for the full catalogue, per-optimizer notes, and guidance on
+choosing the batch size `q`.
 
 ## GPU and batched objectives
 
@@ -174,12 +167,80 @@ pytest tests/ -q          # the whole suite runs in about a minute on CPU
 ruff check src/ tests/ && black --check src/ tests/
 ```
 
+---
+
+# Part 2: The S3-TuRBO method
+
+### Adaptive Sparse Moves and Evidence-Gated Escape for Trust-Region Bayesian Optimization
+
+The flagship optimizer, **S3-TuRBO** (Soft-Sparse Scout TuRBO), is the research contribution of this
+repository. It extends single-region trust-region Bayesian optimization (TuRBO) along two independent,
+separable axes, and derives almost every internal constant from the problem so that the optimizer does
+not itself become a tuning problem. The full treatment (assumptions, propositions, derivations, and
+benchmark tables) is the method note [docs/s3turbo-method.md](docs/s3turbo-method.md); the
+[interactive project page](webpage) shows every mechanism live.
+
+### Two separable contributions
+
+* **An adaptive soft-sparse local move.** A trust-region step perturbs a masked subset of coordinates.
+  The mask is a single Beta-law family whose `dense` and `hard` variants are limiting cases; the
+  `adaptive` default learns its own sparsity and concentration online from which coordinates have paid
+  off, so it fits the landscape without being told the regime. The active fraction is derived as
+  `1/sqrt(d)`, not tuned. This axis is what carries the method on unimodal and simple landscapes, and it
+  stands on its own with the escape switched off.
+
+* **An evidence-gated escape (the reactive scout).** To reach far-apart basins, the scout spends a
+  small derived base rate of far probes, `rho_0 = 1/(escape_k * sqrt(d))`, and lets the outcome of the
+  candidate regions it has already planted modulate that spend: an escape value `E` rises when a planted
+  candidate proves spatially distinct (by the already-derived novelty radius) and competitive, and
+  decays when candidates prove redundant. It does not try to predict a far basin from local data (a
+  local search's surrogate never samples the far region, so its data cannot reveal one); it reacts to
+  cheap speculative outcomes. The whole escape axis reduces to one dial, `escape_k`.
+
+Because the two axes are separate, the guidance splits cleanly: if you know the problem is close to
+unimodal, use the mask alone (`scout_strategy="none"`); if the regime is unknown or multi-basin, add the
+reactive scout (the default) and lower `escape_k` toward `0.5` as separated basins become more likely.
+
+### The one dial: `escape_k`
+
+```python
+khpo.minimize(f, space, {"name": "s3turbo", "budget": 300}, budget=300, q=4)  # default: reactive, escape_k=0.75
+```
+
+Large `escape_k` approaches pure-local `none` (right for a near-unimodal problem); small `escape_k`
+scouts aggressively toward `switch`-like escape (right for a multi-basin one). The default
+`escape_k=0.75` is the best all-round setting; the recommended range is `0.5`-`1.0`. `switch` remains
+available directly as the strongest raw escape for near-certain hidden cores, and the fixed masks
+(`dense`, `hard`, `soft`) and named `preset`s are kept as static reference configurations for the
+ablation.
+
+### What the benchmarks show
+
+Honestly benchmarked against clean from-scratch baselines (Sobol, CMA-ES, GP-BO, HEBO, TuRBO), reported
+as average rank (lower is better):
+
+* **Synthetic general (8 smooth tasks, d up to 25).** S3-TuRBO leads: pure-local `none` and the default
+  `reactive` sit ahead of every external baseline, and a mask-axis ablation shows every mask beats
+  no-mask with the adaptive mask ranking best.
+* **Real scikit-learn HPO (5 tasks, budget 50).** The default `reactive` (`escape_k=0.75`) ranks
+  **first overall** (avg rank 1.80 vs 2.20 for pure-local `none`), ahead of every baseline. This is the
+  regime the method is built for.
+* **Many-basin escape.** A smaller `escape_k` reaches narrower far cores; `escape_k=0.1` matches the
+  aggressive `switch` scout on the hardest barrier-separated task, where pure-local methods stay trapped.
+* **Bayesmark (HEBO's NeurIPS 2020 BBO Challenge suite).** On this deliberately low-dimensional, largely
+  unimodal benchmark (HEBO's home turf), S3-TuRBO with the scout off scores highest and beats a HEBO
+  reimplementation, and the default reactive ties it, evidence that the soft-sparse mask is a standalone
+  contribution competitive with a competition winner on its own turf.
+
+Full tables, curves, and the diagonal "each suite won by its matching `escape_k`" summary are in
+[docs/s3turbo-method.md](docs/s3turbo-method.md).
+
 ## Citation
 
 ```bibtex
 @misc{kohaku2026s3turbo,
-  title  = {Soft-Sparse Scout TuRBO: Trust-Region Thompson Sampling
-            with Orthogonal Move and Escape Axes},
+  title  = {S3-TuRBO: Adaptive Sparse Moves and Evidence-Gated Escape
+            for Trust-Region Bayesian Optimization},
   author = {Shih-Ying Yeh},
   year   = {2026},
   note   = {KohakuHPO: https://github.com/KohakuBlueleaf/KohakuHPO}
