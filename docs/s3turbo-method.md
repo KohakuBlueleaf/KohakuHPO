@@ -42,7 +42,7 @@ from a batch-sequential oracle returning $f$ at $q$ points per round within a bu
 - **(A1) local smoothness.** $f$ is Lipschitz on each basin, so a GP posterior is faithful locally.
 - **(A2) prior point.** an $x_0$ with $f(x_0)\ll\mathbb E_{x\sim\mathcal U}f(x)$ but $x_0\notin\arg\min f$ (may be absent).
 - **(A3) heterogeneity.** the active subspace of local improvement has effective dimension $d_{\mathrm{eff}}\ll d$.
-- **(A4) multi-basin.** $\{x:f(x)\le f^\star+\epsilon\}=\bigcup_k B_k$ with $\operatorname{dist}(B_i,B_j)\gg r_{\text{local}}$, and some $B_k$ contain a sub-basin of much lower value and much smaller radius.
+- **(A4) multi-basin.** $\{x:f(x)\le f^\star+\epsilon\}=\bigcup_k B_k$ with $\mathrm{dist}(B_i,B_j)\gg r_{\text{local}}$, and some $B_k$ contain a sub-basin of much lower value and much smaller radius.
 
 These assumptions pull against each other. (A1)–(A2) demand hard local exploitation near $x_0$; (A4) demands a nonzero probability of leaving the current basin; (A3) demands that a local step move only a few coordinates. They are three separate requirements, met by three separate mechanisms: a local surrogate (§2), a scout (§3.3), and a coordinate mask (§3.1).
 
@@ -62,17 +62,17 @@ $$
 The box adapts through a success counter $s$ and a failure counter $\phi$:
 
 $$
-\ell\leftarrow\min(\ell_{\max},1.5\,\ell)\ \text{ if } s\ge\texttt{succ\_tol};\qquad
-\ell\leftarrow\max(\ell_{\min},\ell/2)\ \text{ if } \phi\ge\texttt{fail\_tol}.
+\ell\leftarrow\min(\ell_{\max},1.5\,\ell)\ \text{ if } s\ge s_{\text{tol}};\qquad
+\ell\leftarrow\max(\ell_{\min},\ell/2)\ \text{ if } \phi\ge \phi_{\text{tol}}.
 $$
 
 Thompson sampling earns its place here for two reasons. First, it carries no acquisition trade-off constant. Expected improvement and upper-confidence-bound acquisitions both need a term or coefficient that trades exploration against exploitation, and in high dimension a global GP with such an acquisition tends to over-explore, which is the very failure that motivated TuRBO's local trust region. A Thompson sample instead selects a point in proportion to its posterior probability of being the minimizer, so the exploration-exploitation balance is inherited from the surrogate's own uncertainty rather than set by hand. Second, it gives batch diversity for free: because the $q$ realizations are drawn independently, their minimizers naturally spread across the plausible optima without any constant-liar or penalization heuristic to keep a batch from collapsing onto one point. A stronger acquisition such as log-expected-improvement could be swapped in, but it would reintroduce a constant to tune and the per-batch diversity heuristic that Thompson sampling avoids, so we keep Thompson sampling as the base. Everything the method adds on top must preserve this knob-free property.
 
 The limitation of the base is structural, not statistical. Once the box collapses onto one basin, a strictly better basin outside the box has probability of exactly zero of ever being sampled:
 
-> **Proposition 1 (collapse).** If $\mathrm{Box}(R)\subseteq B_i$ and $\operatorname{dist}(B_i,B_j)>\ell/2$ for a better basin $B_j$, then under the base method $\Pr[X\in B_j]=0$ for the next proposal $X$.
+> **Proposition 1 (collapse).** If $\mathrm{Box}(R)\subseteq B_i$ and $\mathrm{dist}(B_i,B_j)>\ell/2$ for a better basin $B_j$, then under the base method $\Pr[X\in B_j]=0$ for the next proposal $X$.
 >
-> *Proof.* $X\in\mathrm{Box}(R)$ almost surely, so $\lVert X-c\rVert_\infty\le\ell/2$. For any $z\in B_j$, $\lVert z-c\rVert\ge\operatorname{dist}(B_i,B_j)>\ell/2\ge\lVert X-c\rVert$, hence $X\neq z$ and $X\notin B_j$ a.s. $\square$
+> *Proof.* $X\in\mathrm{Box}(R)$ almost surely, so $\lVert X-c\rVert_\infty\le\ell/2$. For any $z\in B_j$, $\lVert z-c\rVert\ge\mathrm{dist}(B_i,B_j)>\ell/2\ge\lVert X-c\rVert$, hence $X\neq z$ and $X\notin B_j$ a.s. $\square$
 
 So far-basin discovery is impossible without an external channel, which is exactly what the scout axis supplies. A second, independent weakness is that the base kernel perturbs every coordinate at one shared width, which is the wrong step under heterogeneity (A3), and this is what the mask axis repairs.
 
@@ -100,7 +100,7 @@ The method is the base plus two independent choices: the **local move** (which c
 A raw candidate $r$ sits somewhere in the box. Rather than use it wholesale, each coordinate of $r$ is mixed toward the region center $c$ by a weight $\alpha_j\in[0,1]$: weight one takes the box value, weight zero keeps the center, in between takes a partial step. A move is thus a law over the weight vector $\alpha$, replacing the base kernel $\kappa_R$ by the masked kernel
 
 $$
-\kappa_R^m:\quad X = c + \operatorname{diag}(\alpha)\,(r-c),\qquad r\sim\mathcal U(\mathrm{Box}(R)),\quad \alpha\sim M_m\big(\rho(v_R)\big).
+\kappa_R^m:\quad X = c + \mathrm{diag}(\alpha)\,(r-c),\qquad r\sim\mathcal U(\mathrm{Box}(R)),\quad \alpha\sim M_m\big(\rho(v_R)\big).
 $$
 
 Three laws $M_m(\rho)$, each with expected active mass $\mathbb E\sum_j\alpha_j=\rho d$:
@@ -317,9 +317,11 @@ The whole method is one ask/tell loop over a state that carries the data, the re
 **Ask.** The scout allocates the $q$ slots across regions and move types (§3.3). Each local slot draws from the masked Thompson kernel of its region: for region $R$ with mask $m'$, the mask shape is set from the derived $\rho$ and, when adaptive, the credit,
 
 $$
-\rho=1/\sqrt d\ \ (\text{§3.2}),\qquad
-c_{0,R}=\Gamma(s_t)\ \ (\text{§3.2a, adaptive; else fixed}),
+\rho=1/\sqrt d,\qquad
+c_{0,R}=\Gamma(s_t)\ \ (\text{adaptive; else fixed}),
 $$
+
+with $\rho$ the derived active fraction (§3.2) and $c_{0,R}$ the concentration, learned by the adaptive mask (§3.2a) or a fixed constant otherwise,
 
 and the slot is one discretized Thompson draw $\mathrm{TS}_1(R;\mathcal D_{R,t})$ under $\kappa^{m'}_R$ evaluated with $(\rho_R,c_{0,R})$. Scout slots are far probes. Collecting the slots,
 
@@ -377,10 +379,10 @@ The following quantities enter the operator; the last column says whether each i
 | quantity | value / rule | origin |
 |---|---|---|
 | $\rho=1/\sqrt d$ | §3.2, §5.1 | derived ($d$; active-set assumption) |
-| $\texttt{succ\_tol},\texttt{fail\_tol}$ | §5.1 | TuRBO constant / derived ($d_{\mathrm{eff}},q$) |
+| `succ_tol`, `fail_tol` | §5.1 | TuRBO constant / derived ($d_{\mathrm{eff}},q$) |
 | $\ell_{\text{init}},\ell_{\min},\ell_{\max}$ | §5.2 | derived (cube geometry, resolution) |
-| $\texttt{n\_init},\texttt{max\_regions}$ | §5.2 | derived ($q$; budget-proportional) |
-| $N,\texttt{max\_data}$ | §5.2 | compute controls (not optimizer knobs) |
+| `n_init`, `max_regions` | §5.2 | derived ($q$; budget-proportional) |
+| $N$, `max_data` | §5.2 | compute controls (not optimizer knobs) |
 | $\delta$ | §5.4 | derived (cube geometry) |
 | $S_y$ | §5.3 | posterior ($\mathbf y$) |
 | $s_t,\ C,\ c_{0,t}$ (adaptive mask) | §3.2a | posterior ($\mathcal D_t$, credit) |
@@ -400,35 +402,35 @@ The active fraction is $\rho=1/\sqrt d$ (§3.2), so a masked region moves $d_{\m
 
 $$
 d_{\mathrm{eff}}=\rho d=\sqrt d,\qquad
-\texttt{succ\_tol}=3,\qquad
-\texttt{fail\_tol}=\max\!\big(4,\ \lceil d_{\mathrm{eff}}/q\rceil\big).
+s_{\text{tol}}=3,\qquad
+\phi_{\text{tol}}=\max\!\big(4,\ \lceil d_{\mathrm{eff}}/q\rceil\big).
 $$
 
-$\texttt{succ\_tol}=3$ is TuRBO's grow-after-three-successes constant, adopted as is. For $\texttt{fail\_tol}$: each batch probes $q$ of the region's $d_{\mathrm{eff}}$ effective directions, so declaring the box too large should take about one failed batch per effective direction, $\lceil d_{\mathrm{eff}}/q\rceil$ batches. The floor of $4$ is an interpretable guard, not a fit: a single Thompson batch fails to improve with non-negligible probability even inside a good box (the draws are stochastic), so shrinking on fewer than a few consecutive failures would react to sampling noise rather than a genuinely oversized box. Four is the smallest count at which the chance of four unlucky no-improvement batches in a row is small.
+`succ_tol` = 3 is TuRBO's grow-after-three-successes constant, adopted as is. For `fail_tol`: each batch probes $q$ of the region's $d_{\mathrm{eff}}$ effective directions, so declaring the box too large should take about one failed batch per effective direction, $\lceil d_{\mathrm{eff}}/q\rceil$ batches. The floor of $4$ is an interpretable guard, not a fit: a single Thompson batch fails to improve with non-negligible probability even inside a good box (the draws are stochastic), so shrinking on fewer than a few consecutive failures would react to sampling noise rather than a genuinely oversized box. Four is the smallest count at which the chance of four unlucky no-improvement batches in a row is small.
 
 ### 5.2 Warmup, trust-region bounds, sizes, cadences
 
 $$
-\texttt{n\_init}=2q,\qquad
+n_{\text{init}}=2q,\qquad
 \ell_{\text{init}}=\ell_{\max}=1,\qquad
 \ell_{\min}=\delta/8,
 $$
 
 $$
-\texttt{max\_regions}=1+\min\!\big(3,\max(1,\lfloor B/(20q)\rfloor)\big)\ \text{(and }1\text{ for the single-region scouts }\textsf{none},\textsf{random}),\qquad
-\texttt{focus\_batches}=\lceil f_{\text{focus}}B/q\rceil.
+N_{\max}=1+\min\!\big(3,\max(1,\lfloor B/(20q)\rfloor)\big)\ \text{(and }1\text{ for the single-region scouts }\textsf{none},\textsf{random}),\qquad
+T_{\text{focus}}=\lceil f_{\text{focus}}B/q\rceil.
 $$
 
-**Warmup.** $\texttt{n\_init}=2q$ is one batch-pair of quasirandom points, the minimum to fit a GP before the first Thompson draw. A larger floor is unnecessary (it never binds) and a $d{+}1$ rule, which one might expect from the $d$ lengthscales, is measurably worse: the GP's shared prior needs far fewer than $d{+}1$ points to give a useful posterior, and spending more of the budget on undirected warmup costs more than it buys.
+**Warmup.** `n_init` $=2q$ is one batch-pair of quasirandom points, the minimum to fit a GP before the first Thompson draw. A larger floor is unnecessary (it never binds) and a $d{+}1$ rule, which one might expect from the $d$ lengthscales, is measurably worse: the GP's shared prior needs far fewer than $d{+}1$ points to give a useful posterior, and spending more of the budget on undirected warmup costs more than it buys.
 
 **Trust-region bounds are geometric, not tuned.** The box side cannot exceed the cube side, so $\ell_{\max}=1$; there is no larger meaningful value. Starting at $\ell_{\text{init}}=\ell_{\max}=1$ begins the search global and lets the failure counter shrink it, so no initial size is chosen. The floor $\ell_{\min}$ is a resolution: below the side at which the box can no longer separate a novel candidate from the incumbent (the novelty radius $\delta$ of §5.4), further shrinking only refines noise, so $\ell_{\min}=\delta/8$, a few halvings below $\delta$. An ablation (§7.2 context) confirms these parameter-free bounds match the hand-picked prototype values and beat TuRBO's own published constants; the prototype's conditional lookup table for $\ell$ earned nothing.
 
-**Region count and focus window.** A single-region scout keeps one region; a multi-region scout adds one candidate region per $\sim\!20$ asks, so the count scales with how much budget there is to explore alternatives, capped at a few so per-region GP fits and pruning stay cheap. The focus window $\texttt{focus\_batches}=\Theta(f_{\text{focus}}B/q)$ is exactly the consecutive-concentration length §3.5 shows is needed to reach a narrow core. The candidate pool $N$ and GP cap $\texttt{max\_data}$ are compute controls, not optimizer knobs: the argmin over the Sobol pool improves monotonically with $N$, and $\texttt{max\_data}$ only bounds the GP's $O(n^3)$ cost, so both are set to a comfortably large value and results are insensitive to the exact number.
+**Region count and focus window.** A single-region scout keeps one region; a multi-region scout adds one candidate region per $\sim\!20$ asks, so the count scales with how much budget there is to explore alternatives, capped at a few so per-region GP fits and pruning stay cheap. The focus window `focus_batches` $=\Theta(f_{\text{focus}}B/q)$ is exactly the consecutive-concentration length §3.5 shows is needed to reach a narrow core. The candidate pool $N$ and GP cap `max_data` are compute controls, not optimizer knobs: the argmin over the Sobol pool improves monotonically with $N$, and `max_data` only bounds the GP's $O(n^3)$ cost, so both are set to a comfortably large value and results are insensitive to the exact number.
 
 ### 5.3 Observed values → scale-free gates
 
 $$
-S_y=\max\!\big(\operatorname{IQR}(\mathbf y),\,1.4826\,\operatorname{MAD}(\mathbf y),\,\sigma_{\text{noise}},\,\epsilon\big).
+S_y=\max\!\big(\mathrm{IQR}(\mathbf y),\,1.4826\,\mathrm{MAD}(\mathbf y),\,\sigma_{\text{noise}},\,\epsilon\big).
 $$
 
 An absolute margin is meaningless across tasks whose scales differ by orders of magnitude. The factor $1.4826\,\mathrm{MAD}$ is the consistent Gaussian $\sigma$-estimator; IQR guards multimodal spreads; the outer max is conservative on heavy tails. Dividing every gate and the importance weights $\beta,\eta$ by $S_y$ turns them into pure numbers that transfer across tasks.
@@ -464,7 +466,7 @@ scout is the one axis a user usually sets (§8).
 
 ## 6. Components introduced here
 
-The method reuses validated mechanisms but adds six small pieces not present verbatim in the prototypes, flagged so the reader knows what is new. First, treating dense and hard as the $c_0\to0$ and $\rho=1$ limits of one Beta law (Proposition 2) is a consolidation, not a new behavior, since it is numerically identical at the endpoints. Second, the scale-free gates via $S_y$ (§5.3) are applied uniformly to promotion, focus, and region importance; the prototypes used per-strategy absolute margins, and unifying them under one robust scale is new and makes the constants task-transferable. Third, the constants of §5 are derived from $(d,q,B)$ rather than fixed by hand: the prototypes carried them as constructor constants, and replacing each with its mathematical form, the active fraction $\rho=1/\sqrt d$, geometric trust-region bounds, budget-proportional sizes, is what removes them from the user surface. An ablation confirms the derived forms are no worse than the hand-tuned ones and in aggregate slightly better, so the derivations pay their way and are not merely cosmetic. Fourth, the trust-region update granularity is made an explicit axis with per-batch as the default: the prototypes counted trust-region success/failure per point, which fires the failure counter up to $q$ times per batch and collapses the box before it can drift, badly hurting smooth funnels; per-batch counting matches standard TuRBO and what the $\texttt{fail\_tol}$ derivation assumes, and the two are exposed as a knob because the ablation is regime-split. Fifth, the adaptive mask of §3.2a is new: rather than choosing the mask by regime up front, it learns the soft law's concentration online from per-coordinate improvement credit (attributed by realized displacement), so the same configuration sharpens from soft toward hard as an active set emerges, without being told the regime (Proposition 3a). The active fraction is left at its derived value $1/\sqrt d$, since an ablation found deriving it online (from the credit's participation ratio) is worse; and the adaptive mask reduces exactly to the fixed soft mask before any credit has accrued, so it strictly extends the fixed masks. Sixth, the adaptive **reactive** scout of §3.3 is new: rather than choosing a scout by regime, it spends escape budget in proportion to accumulated evidence: it keeps a small always-on base scout rate and raises an escape value when a planted candidate region proves spatially distinct from the incumbent (by the already-derived novelty radius) and competitive, lowering it when candidates prove redundant. It therefore does not attempt to predict a far basin from data that cannot reveal one (§9); it reacts to the outcome of cheap speculative candidates, so it escapes like `switch` on multi-basin landscapes yet stays near `none` on smooth ones, the escape analogue of the adaptive mask, and the escape scout with the best all-round profile (first on the real HPO suite, near-`none` on the general suite; §7.3). The §5 derivations are arguments, not theorems, and where an assumption is heuristic, such as the active-set size of order $\sqrt d$, it is stated as such. Everything else (the masked kernel, the four fixed scout strategies, region-local candidate training, importance-based pruning, the focus burst) is ported unchanged from the validated prototypes.
+The method reuses validated mechanisms but adds six small pieces not present verbatim in the prototypes, flagged so the reader knows what is new. First, treating dense and hard as the $c_0\to0$ and $\rho=1$ limits of one Beta law (Proposition 2) is a consolidation, not a new behavior, since it is numerically identical at the endpoints. Second, the scale-free gates via $S_y$ (§5.3) are applied uniformly to promotion, focus, and region importance; the prototypes used per-strategy absolute margins, and unifying them under one robust scale is new and makes the constants task-transferable. Third, the constants of §5 are derived from $(d,q,B)$ rather than fixed by hand: the prototypes carried them as constructor constants, and replacing each with its mathematical form, the active fraction $\rho=1/\sqrt d$, geometric trust-region bounds, budget-proportional sizes, is what removes them from the user surface. An ablation confirms the derived forms are no worse than the hand-tuned ones and in aggregate slightly better, so the derivations pay their way and are not merely cosmetic. Fourth, the trust-region update granularity is made an explicit axis with per-batch as the default: the prototypes counted trust-region success/failure per point, which fires the failure counter up to $q$ times per batch and collapses the box before it can drift, badly hurting smooth funnels; per-batch counting matches standard TuRBO and what the `fail_tol` derivation assumes, and the two are exposed as a knob because the ablation is regime-split. Fifth, the adaptive mask of §3.2a is new: rather than choosing the mask by regime up front, it learns the soft law's concentration online from per-coordinate improvement credit (attributed by realized displacement), so the same configuration sharpens from soft toward hard as an active set emerges, without being told the regime (Proposition 3a). The active fraction is left at its derived value $1/\sqrt d$, since an ablation found deriving it online (from the credit's participation ratio) is worse; and the adaptive mask reduces exactly to the fixed soft mask before any credit has accrued, so it strictly extends the fixed masks. Sixth, the adaptive **reactive** scout of §3.3 is new: rather than choosing a scout by regime, it spends escape budget in proportion to accumulated evidence: it keeps a small always-on base scout rate and raises an escape value when a planted candidate region proves spatially distinct from the incumbent (by the already-derived novelty radius) and competitive, lowering it when candidates prove redundant. It therefore does not attempt to predict a far basin from data that cannot reveal one (§9); it reacts to the outcome of cheap speculative candidates, so it escapes like `switch` on multi-basin landscapes yet stays near `none` on smooth ones, the escape analogue of the adaptive mask, and the escape scout with the best all-round profile (first on the real HPO suite, near-`none` on the general suite; §7.3). The §5 derivations are arguments, not theorems, and where an assumption is heuristic, such as the active-set size of order $\sqrt d$, it is stated as such. Everything else (the masked kernel, the four fixed scout strategies, region-local candidate training, importance-based pruning, the focus burst) is ported unchanged from the validated prototypes.
 
 ---
 
