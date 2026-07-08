@@ -1,0 +1,1029 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Soft-Sparse Scout TuRBO · a trust-region Thompson sampler for many-basin optimization</title>
+<meta name="description" content="Soft-Sparse Scout TuRBO extends trust-region Bayesian optimization along two orthogonal axes: a coordinate-mask family for heterogeneous local moves and a scout family for reaching far-apart basins, collapsed to a single continuous escape dial escape_k, with almost every internal constant derived from the problem itself. Interactive demos and full benchmarks against CMA-ES, GP-BO, HEBO, TuRBO and Sobol." />
+<meta name="author" content="Kohaku BlueLeaf" />
+<meta property="og:title" content="Soft-Sparse Scout TuRBO" />
+<meta property="og:description" content="A trust-region Thompson sampler for expensive, high-dimensional, many-basin optimization. Interactive project page." />
+<link rel="stylesheet" href="vendor/katex/katex.min.css" />
+<link rel="stylesheet" href="css/style.css" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230f172a'/><rect x='22' y='22' width='56' height='56' rx='6' fill='none' stroke='%2322d3ee' stroke-width='7'/><circle cx='50' cy='50' r='9' fill='%2322d3ee'/></svg>" />
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a class="nav-brand" href="#top">S<span class="s3">³</span>·TuRBO</a>
+    <div class="nav-links">
+      <a href="#problem">Problem</a>
+      <a href="#base">Base</a>
+      <a href="#masks">Masks</a>
+      <a href="#scouts">Scouts</a>
+      <a href="#constants">Constants</a>
+      <a href="#benchmarks">Benchmarks</a>
+      <a href="#presets">Presets</a>
+      <a href="#citation">Cite</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <h1><span class="grad">Soft-Sparse Scout TuRBO</span><br />a trust-region Thompson sampler for many-basin optimization</h1>
+  <p class="tagline">
+    Two orthogonal extensions to trust-region Bayesian optimization: a coordinate-mask family for
+    heterogeneous local moves, and a scout family for reaching far-apart basins. Almost every internal
+    constant is computed from the problem itself, so the optimizer never becomes a second tuning problem.
+  </p>
+  <div class="authors"><a href="https://github.com/KohakuBlueleaf" target="_blank" rel="noopener">Kohaku BlueLeaf</a></div>
+  <div class="affil">kblueleaf.net · 2026</div>
+  <div class="hero-btns">
+    <a class="primary" href="assets/soft-sparse-scout-turbo.pdf" target="_blank" rel="noopener">📄 Method note (PDF)</a>
+    <a href="https://github.com/KohakuBlueleaf" target="_blank" rel="noopener">💻 Code</a>
+    <a href="#benchmarks">📊 Benchmarks</a>
+    <a href="#citation">🔖 Cite</a>
+  </div>
+</header>
+
+<div class="page">
+<aside class="toc">
+  <div class="toc-title">Contents</div>
+  <a href="#abstract">Abstract</a>
+  <a href="#problem">1 · The problem</a>
+  <a href="#base">2 · Base method</a>
+  <a class="sub" href="#demo-ts-sec">↳ Thompson sampling, live</a>
+  <a href="#masks">3 · Axis 1: the local move</a>
+  <a class="sub" href="#demo-mask-sec">↳ Mask explorer</a>
+  <a class="sub" href="#adaptive-head">↳ Adaptive mask, live</a>
+  <a href="#scouts">4 · Axis 2: the scout</a>
+  <a class="sub" href="#demo-pg-sec">↳ Many-basin playground</a>
+  <a href="#constants">5 · Where constants come from</a>
+  <a href="#benchmarks">6 · Benchmarks</a>
+  <a href="#presets">7 · Choosing a configuration</a>
+  <a href="#limits">8 · Limits</a>
+  <a href="#citation">Citation</a>
+</aside>
+
+<article>
+
+<div class="abstract" id="abstract">
+  <div class="abs-label">TL;DR</div>
+  <p>
+    Expensive optimization problems in 20 to 30 dimensions often share an awkward shape: a decent starting
+    configuration is known, only a few coordinates matter at a time, and the good configurations form many
+    separated islands, some of which hide a much better narrow core. A single trust region exploits the
+    start well but can provably never leave its basin. A global surrogate reaches everywhere but exploits
+    nothing. This page describes a method that keeps the trust-region core and adds the two missing
+    capabilities as <strong>independent, composable axes</strong>: a <strong>mask</strong> that decides which
+    coordinates a local step moves, and a <strong>scout</strong> that decides how distant basins are reached.
+    Both are made adaptive. The mask learns its own shape from the run. The entire escape axis collapses to
+    <strong>one derived dial, <code>escape_k</code></strong>: the base scout rate is
+    \(\rho_0 = 1/(\texttt{escape\_k}\sqrt d)\), so a large <code>escape_k</code> behaves like pure local
+    search on a smooth funnel and a small one behaves like an aggressive multi-basin escape: a single
+    continuous knob spanning the whole axis. At its default <code>escape_k=0.75</code> the shipped optimizer
+    runs the <code>reactive</code> scout, which spends that derived base rate always and lets the
+    <em>outcome</em> of already-planted candidates reallocate it up or down (it never claims to detect a far
+    basin from local data, which is impossible). The default configuration ranks <strong>first on real
+    scikit-learn hyperparameter tuning</strong>, ahead of every baseline, and is second only to pure-local on
+    a smooth synthetic suite, measured against CMA-ES, GP-BO, HEBO, TuRBO and Sobol. The page you are
+    reading lets you watch every mechanism run live.
+  </p>
+</div>
+
+<h2 id="problem"><span class="sec-num">1</span>The problem</h2>
+
+<p class="lead">
+  Minimize an expensive black box \(f:[0,1]^d\to\mathbb R\) with \(d\) around 20 to 30, from a
+  batch-sequential oracle that evaluates \(q\) points per round inside a total budget of \(B\) evaluations.
+</p>
+
+<p>Four structural assumptions describe the target regime:</p>
+
+<div class="assump-grid">
+  <div class="assump"><b>A1 · local smoothness</b>\(f\) is Lipschitz on each basin, so a Gaussian-process surrogate is faithful locally.</div>
+  <div class="assump"><b>A2 · prior point</b>A start \(x_0\) is often known with \(f(x_0)\) far below random, yet \(x_0\) is not the optimum.</div>
+  <div class="assump"><b>A3 · heterogeneity</b>The active subspace of local improvement has effective dimension \(d_{\mathrm{eff}} \ll d\): moving everything at once wrecks a good configuration.</div>
+  <div class="assump"><b>A4 · multi-basin</b>The good set splits into far-apart basins \(B_1, B_2, \dots\), and a few basins hide a much deeper, much narrower core.</div>
+</div>
+
+<p>
+  These assumptions pull against each other. A1 and A2 demand hard local exploitation near \(x_0\). A4
+  demands a nonzero probability of leaving the current basin. A3 demands that a local step move only a few
+  coordinates. They are three separate requirements, and the method meets them with three separate
+  mechanisms: a local surrogate (§2), a coordinate mask (§3), and a scout (§4).
+</p>
+
+<h2 id="base"><span class="sec-num">2</span>Base method and its structural limit</h2>
+
+<p>
+  The base is trust-region Bayesian optimization in the style of TuRBO (Eriksson et al., 2019). Keep a box
+  around the best point, fit a GP on the data inside it, propose the next points from that surrogate, and
+  resize the box from feedback: grow it after a run of improvements, shrink it after a run of failures.
+</p>
+
+<p>
+  Proposals come from a <strong>discretized, batch form of Thompson sampling</strong> rather than the
+  textbook one-point rule. At each ask, lay down a finite candidate pool inside the box (a quasirandom Sobol
+  set), draw \(q\) independent function realizations from the GP posterior restricted to that pool, and take
+  the pool-minimizer of each realization. The \(q\) minimizers are the batch. Fixing the region \(R\) with
+  center \(c\) at its best point:
+</p>
+
+$$
+\kappa_R:\ X = c + r,\ \ r\sim\mathcal U\big(\mathrm{Box}(R)-c\big);\qquad
+\mathrm{TS}_q(R;\mathcal D)=\Big\{\arg\min_{x\in P}g^{(k)}(x)\Big\}_{k=1}^{q},\ \ P\sim\kappa_R^{\otimes N},\ \ g^{(k)}\sim\Pi(\cdot\mid\mathcal D_R).
+$$
+
+<p>
+  The box adapts through a success counter \(s\) and a failure counter \(\phi\):
+</p>
+
+$$
+\ell\leftarrow\min(\ell_{\max},2\ell)\ \text{ if } s\ge\texttt{succ\_tol};\qquad
+\ell\leftarrow\max(\ell_{\min},\ell/2)\ \text{ if } \phi\ge\texttt{fail\_tol}.
+$$
+
+<p>
+  Thompson sampling earns its place for two reasons. First, it carries <strong>no acquisition trade-off
+  constant</strong>: expected improvement and UCB both need a term that balances exploration against
+  exploitation, and in high dimension that balance is exactly what goes wrong. A Thompson draw selects each
+  point in proportion to its posterior probability of being the minimizer, so the balance is inherited from
+  the surrogate's own uncertainty. Second, it gives <strong>batch diversity for free</strong>: the \(q\)
+  realizations are independent, so their minimizers naturally spread across the plausible optima with no
+  constant-liar or penalization heuristic. Everything added later must preserve this knob-free property.
+</p>
+
+<div class="demo" id="demo-ts-sec">
+  <div class="demo-head">
+    <span class="demo-title">Batch Thompson sampling, live</span>
+    <span class="demo-sub">1-D GP · click the plot to add an observation</span>
+  </div>
+  <div class="demo-body" id="demo-ts">
+    <div class="controls">
+      <span class="ctl"><label>batch q</label><input type="range" class="ctl-q" min="1" max="8" step="1" value="4" /><span class="val ctl-q-val">4</span></span>
+      <button class="btn btn-redraw">↻ redraw q samples</button>
+      <button class="btn primary btn-eval">▶ evaluate batch</button>
+      <button class="btn btn-newf">🎲 new function</button>
+      <span class="ctl"><label><input type="checkbox" class="ctl-true" /> show true f</label></span>
+      <span class="ctl"><label><input type="checkbox" class="ctl-mean" checked /> show greedy mean pick</label></span>
+    </div>
+    <canvas class="ts-canvas demo-canvas"></canvas>
+  </div>
+  <div class="demo-caption">
+    Each colored curve is one joint posterior realization; its diamond is that realization's minimizer over
+    the candidate pool (the ticks along the bottom), and the \(q\) diamonds together form the batch. Notice
+    how the picks spread across plausible minima wherever the posterior is uncertain, while a greedy
+    posterior-mean pick (white ring) would send the whole batch to one spot. Press
+    <em>evaluate batch</em> a few times and watch the loop converge.
+  </div>
+</div>
+
+<p>
+  The limitation of the base is structural, not statistical. Once the box collapses onto one basin, a
+  strictly better basin outside it has probability exactly zero of ever being sampled:
+</p>
+
+<div class="prop">
+  <span class="prop-title">Proposition 1 (collapse).</span>
+  <p>
+    If \(\mathrm{Box}(R)\subseteq B_i\) and \(\operatorname{dist}(B_i,B_j) \gt \ell/2\) for a better basin
+    \(B_j\), then under the base method \(\Pr[X\in B_j]=0\) for the next proposal \(X\).
+  </p>
+  <details>
+    <summary>Proof</summary>
+    <p>
+      \(X\in\mathrm{Box}(R)\) almost surely, so \(\lVert X-c\rVert_\infty\le\ell/2\). For any \(z\in B_j\),
+      \(\lVert z-c\rVert\ge\operatorname{dist}(B_i,B_j) \gt \ell/2\ge\lVert X-c\rVert\), hence \(X\neq z\)
+      and \(X\notin B_j\) almost surely. ∎
+    </p>
+  </details>
+</div>
+
+<p>
+  So far-basin discovery is impossible without an external channel, which is exactly what the scout axis
+  supplies. A second, independent weakness is that the base kernel perturbs every coordinate at one shared
+  width, the wrong step under heterogeneity (A3), and that is what the mask axis repairs. The two fixes are
+  orthogonal in the strict sense: any mask composes with any scout.
+</p>
+
+<h2 id="masks"><span class="sec-num">3</span>Axis 1: the local move</h2>
+
+<p>
+  A raw candidate \(r\) sits somewhere in the box. Rather than take it wholesale, each coordinate of \(r\)
+  is mixed toward the region center \(c\) by a weight \(\alpha_j\in[0,1]\): weight one takes the box value,
+  weight zero keeps the center, in between takes a partial step. A <em>move</em> is a law over the weight
+  vector, replacing the base kernel by the masked kernel
+</p>
+
+$$
+\kappa_R^m:\quad X = c + \operatorname{diag}(\alpha)\,(r-c),\qquad r\sim\mathcal U(\mathrm{Box}(R)),\quad \alpha\sim M_m\big(\rho(v_R)\big),
+$$
+
+<p>with three laws, each of expected active mass \(\mathbb E\sum_j\alpha_j=\rho d\):</p>
+
+$$
+\text{dense: }\alpha_j=1;\qquad
+\text{hard: }\alpha_j\overset{\text{iid}}{\sim}\mathrm{Bernoulli}(\rho);\qquad
+\text{soft: }\alpha=\tfrac{\rho d}{\sum_j m_j}\,m,\ \ m_j\overset{\text{iid}}{\sim}\mathrm{Beta}\big(\rho c_0,(1-\rho)c_0\big),\ c_0 \lt 1.
+$$
+
+<p>
+  Dense moves every coordinate (the plain TuRBO move). Hard moves a random subset fully and freezes the
+  rest. Soft draws each weight from a <em>polarized</em> Beta law: with \(c_0 \lt 1\) most mass sits near 0
+  or 1, so it keeps the mostly-frozen character of sparsity, yet it stays continuous, so it can also take a
+  small coordinated step, and its effective dimension varies smoothly with \(\rho\). The three laws are one
+  family:
+</p>
+
+<div class="prop">
+  <span class="prop-title">Proposition 2 (soft contains dense and hard).</span>
+  <p>
+    As \(c_0\to0^{+}\) with mean \(\rho\) fixed, \(M_{\text{soft}}(\rho)\Rightarrow M_{\text{hard}}(\rho)\);
+    and \(M_{\text{soft}}(1)=M_{\text{dense}}\) almost surely.
+  </p>
+  <details>
+    <summary>Proof</summary>
+    <p>
+      With mean fixed at \(\rho\) and \(c_0\to0^{+}\), the density \(\propto
+      x^{\rho c_0-1}(1-x)^{(1-\rho)c_0-1}\) diverges at both ends, concentrating mass on \(\{0,1\}\) with
+      \(\Pr[m_j=1]\to\rho\), i.e. \(\mathrm{Bernoulli}(\rho)\); the renormalizer tends to
+      \(\rho d/(\rho d)=1\). At \(\rho=1\) both Beta parameters force \(m_j=1\). ∎
+    </p>
+  </details>
+</div>
+
+<div class="demo" id="demo-mask-sec">
+  <div class="demo-head">
+    <span class="demo-title">Mask distribution explorer</span>
+    <span class="demo-sub">d = 25 · watch Proposition 2 happen</span>
+  </div>
+  <div class="demo-body" id="demo-mask">
+    <div class="controls">
+      <span class="seg seg-mode">
+        <button data-mode="dense">dense</button>
+        <button data-mode="hard">hard</button>
+        <button data-mode="soft" class="active">soft</button>
+      </span>
+      <span class="ctl"><label>ρ</label><input type="range" class="ctl-rho" min="0.05" max="1" step="0.01" value="0.35" /><span class="val ctl-rho-val">0.35</span></span>
+      <span class="ctl ctl-c0-wrap"><label>c₀</label><input type="range" class="ctl-c0" min="0.05" max="2" step="0.01" value="0.4" /><span class="val ctl-c0-val">0.40</span></span>
+      <button class="btn btn-roll">🎲 resample α</button>
+      <button class="btn btn-limit-hard">limit c₀→0 (≈ hard)</button>
+      <button class="btn btn-limit-dense">limit ρ=1 (= dense)</button>
+    </div>
+    <div class="mask-layout">
+      <div>
+        <div class="mini-title">one draw of α over 25 coordinates</div>
+        <canvas class="mask-bars demo-canvas"></canvas>
+        <div style="font-family:var(--mono);font-size:12px;color:var(--muted);margin-top:6px" class="mask-mass"></div>
+      </div>
+      <div>
+        <div class="mini-title">marginal law of a single weight</div>
+        <canvas class="mask-hist demo-canvas"></canvas>
+      </div>
+    </div>
+    <div style="margin-top:20px">
+      <div class="mini-title">sparsity anneal ρ(v) with derived endpoints · <span style="text-transform:none">ρ(v)=ρ<sub>min</sub>+(ρ<sub>init</sub>−ρ<sub>min</sub>)e<sup>−v/τ</sup></span></div>
+      <div class="controls" style="margin-bottom:6px">
+        <span class="ctl"><label>dimension d</label><input type="range" class="ctl-d" min="5" max="60" step="1" value="25" /><span class="val ctl-d-val">25</span></span>
+      </div>
+      <canvas class="mask-sched demo-canvas"></canvas>
+    </div>
+  </div>
+  <div class="demo-caption">
+    The soft mask at \(c_0=0.4\) is visibly polarized: most weights hug 0 or 1, a few take genuine partial
+    values. Slide \(c_0\) toward 0 and the marginal law becomes two spikes, which is the hard Bernoulli
+    mask; slide \(\rho\) to 1 and every weight is forced to 1, which is dense. Below, the active fraction
+    \(\rho(v)\) decays with a region's visit count: a fresh region moves many coordinates because it does
+    not yet know which ones matter, a mature region polishes a few without disturbing settled knobs.
+  </div>
+</div>
+
+<p>Whether sparsity helps depends on the space, which is why the move is an explicit choice, not a default:</p>
+
+<div class="prop">
+  <span class="prop-title">Proposition 3 (sparsity is conditional).</span>
+  <p>
+    Let \(f\) have active set \(A\) of size \(d_{\mathrm{eff}}\) (coordinates outside \(A\) do not change
+    \(f\)). A \(\rho\)-sparse step leaves every irrelevant coordinate unmoved with probability
+    \((1-\rho)^{d-d_{\mathrm{eff}}}\), versus 0 for a dense step. Hence when \(d_{\mathrm{eff}}\ll d\) (A3),
+    a sparse step is far more likely to be supported on \(A\), while at \(d_{\mathrm{eff}}=d\) freezing any
+    coordinate only removes a usable direction.
+  </p>
+  <details>
+    <summary>Proof sketch</summary>
+    <p>
+      Improvement requires a favorable move within \(A\); perturbing coordinates outside \(A\) adds variance
+      to the surrogate's credit assignment without changing \(f\). Sparse masking raises the probability of
+      a clean step supported on \(A\) precisely when \(A\) is small, and is pure loss of freedom when \(A\)
+      is everything. ∎
+    </p>
+  </details>
+</div>
+
+<p>
+  The move is a pure function of \(\rho\) and \(d\), so new laws drop in without touching the rest of the
+  method. The most important such law is the one that removes the choice entirely.
+</p>
+
+<h3 id="adaptive-head">The adaptive soft mask: learn the mask from the run</h3>
+
+<p>
+  The soft law has two shape parameters: the active fraction \(\rho\) (how many coordinates a move
+  perturbs) and the concentration \(c_0\) (how polarized). The <strong>adaptive soft mask</strong> leaves
+  \(\rho\) at its derived value \(1/\sqrt d\) and learns only \(c_0\), from a running record of which coordinates
+  have paid off. The asymmetry is deliberate: \(\rho\) already has a good schedule derived from
+  \((d,B,q)\), and an ablation found that deriving \(\rho\) online is <em>worse</em>; \(c_0\) has no such
+  prior, so learning it helps. It is the default mask, and the best-ranked mask in the ablation below.
+</p>
+
+<p>
+  Every coordinate carries a <strong>credit</strong> \(s_j\), an exponential-memory estimate of the
+  improvement attributable to moving it. Each improving point casts its normalized improvement, distributed
+  over coordinates by its <em>squared realized displacement</em> \(\delta_{ij}=|u_{ij}-c_j|\) (not by the
+  mask weight \(\alpha\), which is coordinate-symmetric for the soft law and carries no per-coordinate
+  signal):
+</p>
+
+$$
+\Delta_i=\frac{\max(0,\ y_\star-y_i)}{S_y},\qquad
+s_j\leftarrow\lambda\,s_j+\sum_i \Delta_i\,\frac{\delta_{ij}^2}{\sum_k \delta_{ik}^2}.
+$$
+
+<p>The concentration then reads the sharpness of the credit and sets \(c_0\):</p>
+
+$$
+p_j=\frac{s_j}{\sum_k s_k},\qquad
+C=1-\frac{H(p)}{\log d},\quad H(p)=-\sum_j p_j\log p_j,\qquad
+c_{0,t}=\exp\!\big((1-C)\log c_{\max}+C\log c_{\min}\big).
+$$
+
+<div class="prop">
+  <span class="prop-title">Proposition 3a (the credit signal concentrates on the active set).</span>
+  <p>
+    If a positive fraction of improving moves are supported on the active set \(A\) of size
+    \(d_{\mathrm{eff}}\), then credit concentrates on \(A\): \(C\to1\) and the concentration
+    \(c_{0,t}\to c_{\min}\), a polarized mask that commits to \(A\), without \(A\) or the regime being
+    supplied.
+  </p>
+  <details>
+    <summary>Proof sketch</summary>
+    <p>
+      Coordinates outside \(A\) take only an incidental squared-displacement share of the credit, which
+      decays under \(\lambda\); coordinates in \(A\) that had to move for the improvement take the dominant
+      share on every \(A\)-supported improving move. The in-\(A\) to out-of-\(A\) credit ratio therefore
+      grows, so \(p\) concentrates on \(A\) and \(C\to1\); the continuous concentration map gives
+      \(c_{0,t}\to c_{\min}\). ∎
+    </p>
+  </details>
+</div>
+
+<p>
+  The two ends are the design. With no evidence (\(C\to0\)) the mask stays soft and wide, still probing
+  which coordinates matter; once credit concentrates (\(C\to1\)) it sharpens toward a hard, polarized mask
+  on the learned active set. It walks the soft \(\leftrightarrow\) hard edge of the family (Proposition 2)
+  in the direction the data points, and reduces exactly to the fixed soft mask when credit is uninformative,
+  so it never degrades the static path. Watch the credit concentrate and \(c_0\) sharpen below.
+</p>
+
+<div class="demo" id="demo-adaptive-sec">
+  <div class="demo-head">
+    <span class="demo-title">Adaptive mask, learning live</span>
+    <span class="demo-sub">only k of d coordinates matter · watch the mask find them</span>
+  </div>
+  <div class="demo-body" id="demo-adaptive">
+    <div class="controls">
+      <button class="btn primary ad-play">▶ play</button>
+      <button class="btn ad-step">⏭ step</button>
+      <button class="btn ad-reset">↺ reset</button>
+      <span class="ctl"><label>dimension d</label><input type="range" class="ad-d" min="8" max="40" step="1" value="24" /><span class="val ad-d-val">24</span></span>
+      <span class="ctl"><label>active k</label><input type="range" class="ad-k" min="1" max="8" step="1" value="3" /><span class="val ad-k-val">3</span></span>
+    </div>
+    <div class="pg-layout">
+      <div>
+        <canvas class="ad-canvas demo-canvas"></canvas>
+      </div>
+      <div class="pg-side">
+        <div class="pg-stats">
+          <div class="pg-stat"><div class="k">evaluations</div><div class="v ad-eval">1</div></div>
+          <div class="pg-stat"><div class="k">best f</div><div class="v ad-best">–</div></div>
+          <div class="pg-stat"><div class="k">confidence C</div><div class="v ad-conf">0.00</div></div>
+          <div class="pg-stat ad-keff-cell"><div class="k">k_eff (true k)</div><div class="v ad-keff">–</div></div>
+          <div class="pg-stat"><div class="k">ρ (derived)</div><div class="v ad-rho">–</div></div>
+          <div class="pg-stat"><div class="k">c₀ (learned)</div><div class="v ad-c0">–</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="demo-caption">
+    A miniature of the credit loop on an anisotropic objective where only <em>k</em> of <em>d</em>
+    coordinates change the value. Green bars are the true active coordinates, gray are inert; the cyan caps
+    are the last mask draw. As the run proceeds, credit accrues toward the green coordinates, the confidence
+    \(C\) rises, and \(c_0\) drops from soft toward hard while \(\rho\) stays at its derived \(1/\sqrt d\) (the
+    two panels are separate quantities). This toy uses a blind local search, so the credit tilt is modest;
+    under the real GP-guided search it is far sharper, which is why the adaptive mask is the best-ranked
+    mask in the benchmark below.
+  </div>
+</div>
+
+<h2 id="scouts"><span class="sec-num">4</span>Axis 2: the scout</h2>
+
+<p>
+  The scout is the escape channel that Proposition 1 makes mandatory. In practice a scout proposal rarely
+  produces the incumbent improvement itself, since local steps do that; its role is coverage insurance,
+  keeping the probability of reaching a distant useful basin above zero at low cost to local exploitation.
+  A scout strategy is a triple of a <strong>tick</strong> (fire a scout this ask?), a
+  <strong>promotion</strong> rule (turn an observation into a candidate region?), and an
+  <strong>allocation</strong> (split the \(q\) slots across regions and moves):
+</p>
+
+$$
+\pi(\mathcal R_t,t)=[\,t\equiv0\ (\mathrm{mod}\ p)\,]\ \lor\ [\,\text{no improvement}\ge\texttt{stag}\,],
+$$
+$$
+\mathrm{prom}(u,y,\mathcal R)=\Big[\min_{R}\tfrac{\lVert u-c_R\rVert}{\sqrt d}\ge\delta\Big]\ \wedge\ \Big[\,y\le Q_a(\mathbf y)\ \lor\ y\le\min\mathbf y+c\,S_y\,\Big].
+$$
+
+<p>
+  The headline strategies (<code>none</code>, <code>random</code>, <code>switch</code>,
+  <code>reactive</code>) differ <em>only</em> in these three functions. (A fifth internal base class,
+  <code>sidecar</code>, supplies the protected-main-plus-side-channel scaffolding that <code>switch</code> and
+  <code>reactive</code> build on; it is not a strategy a user selects.)
+</p>
+
+<div class="tbl-wrap" style="border:none">
+<table class="plain" style="min-width:640px">
+  <thead><tr><th>strategy</th><th>mines the archive</th><th>allocation on a tick</th><th>focus burst</th></tr></thead>
+  <tbody>
+    <tr><td><code>none</code></td><td>no</td><td>\(q\) local on the single region</td><td>no</td></tr>
+    <tr><td><code>random</code></td><td>yes</td><td>\(q-1\) local + 1 far probe</td><td>no</td></tr>
+    <tr><td><code>switch</code></td><td>no</td><td>\(q-s\) local on the protected main + \(s\) side slot, unless a focus episode is active</td><td>\(q-1\) dense in the candidate + 1 protected main, for a bounded window</td></tr>
+    <tr><td class="method-preset"><code>reactive</code> <span style="font-weight:600;color:var(--muted)">(default)</span></td><td>no</td><td>same scaffolding as <code>switch</code>, but the tick fires at the \(k\)-derived rate \(\rho_0\), scaled up by evidence</td><td>evidence-gated: armed only once the escape value clears half \(\rho_0\)</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  A far probe is the pool point farthest from all data,
+  \(u^\star=\arg\max_{u}\min_i\lVert u-u_i\rVert\). The escape channel is what makes distant basins
+  reachable at all:
+</p>
+
+<div class="prop">
+  <span class="prop-title">Proposition 4 (escape floor).</span>
+  <p>
+    Let \(\mu_t\) be the probability that a scout slot at ask \(t\) lands in \(\bigcup_k B_k\), and
+    \(\rho_t\) the fraction of ask-\(t\) slots that are scout slots. Then
+  </p>
+  $$\Pr[\text{some scout reaches a useful basin by ask }T]\ \ge\ 1-\prod_{t=1}^{T}(1-\rho_t\mu_t).$$
+  <p>
+    For <code>none</code>, \(\rho_t\equiv0\) and the bound is 0, consistent with Proposition 1. For any
+    strategy with a periodic tick, \(\rho_t\ge s/(pq) \gt 0\), so the floor is strictly positive and tends
+    to 1 as \(T\to\infty\) whenever \(\inf_t\mu_t \gt 0\).
+  </p>
+  <details>
+    <summary>Proof</summary>
+    <p>
+      The complementary event, no scout ever lands, factorizes across ticks with per-ask non-landing
+      probability at most \(1-\rho_t\mu_t\); take the product and complement. ∎
+    </p>
+  </details>
+</div>
+
+<h3>Candidate regions and importance</h3>
+
+<p>
+  The multi-region strategies keep one main region on the incumbent and a few candidates. A candidate is
+  created only if it is genuinely far from existing regions (novelty radius \(\delta\)) and passes the value
+  gate; it first takes a few cheap probes, then fits its GP on <em>only its own local data</em>, so it
+  explores its own basin instead of inheriting the incumbent's. This region-local training is the single
+  most important implementation detail. When there are too many regions, the least valuable is dropped, with
+  youth and distance rewarded so a promising far region is not starved:
+</p>
+
+$$
+\mathcal I(R)=\hat y_R-\beta\,S_y\sqrt{\tfrac{\log(n_t+2)}{v_R+1}}-\eta\,S_y\,\nu(R),\qquad
+\nu(R)=\min_{R'\neq R}\tfrac{\lVert c_R-c_{R'}\rVert}{\sqrt d}.
+$$
+
+<h3>Why the scout must be conditional and asymmetric</h3>
+
+<p>
+  On a deliberately hard structure (many look-alike basins, a few hiding narrow cores, a start planted
+  off-core), the exploration designs separate cleanly. Serving all basins equally achieves the best
+  coverage but the worst final value: it over-explores and under-polishes. A strictly bounded
+  <code>sidecar</code> side channel protects the local path and ties the strong baselines, but it still
+  misses cores, because it never concentrates enough budget on any one candidate. The <code>switch</code>
+  is the first to reach a core, because it <em>concentrates</em> \(q-1\) slots on one candidate for a
+  bounded window while keeping one protected main slot. The quantitative reason is a volume argument:
+  reaching a narrow core of radius \(r_c\ll\ell\) from outside requires
+  \(\Omega\big((\ell/r_c)^{d_{\mathrm{eff}}}\big)\) <em>concentrated</em> local samples (the shrinking-box
+  volume ratio). A per-batch budget of \(s\) slots supplies \(O(sT)\) total but only \(O(s)\)
+  <em>consecutive</em> samples on any one candidate, which is insufficient unless \(s\) is temporarily
+  raised. The switch burst raises it to \(q-1\) for \(\Theta(f_{\text{focus}}B/q)\) consecutive asks, the
+  minimal change that makes the required concentration attainable while one main slot stays protected.
+</p>
+
+<p>
+  The principle: exploration cheap and conditional; intensification temporary, bounded, and evidence-gated.
+</p>
+
+<h3 id="escape-dial">One dial for the whole escape axis: <code>escape_k</code></h3>
+
+<p>
+  The four discrete scouts span a spectrum, from no escape (<code>none</code>) to strong escape
+  (<code>switch</code>), but forcing a user to pick a point on that spectrum re-introduces the tuning
+  problem the method is trying to remove. The shipped optimizer replaces the choice with a
+  <strong>single continuous dial</strong>. Every scout's base rate of far probes is derived from one number
+  \(k=\)<code>escape_k</code>:
+</p>
+
+$$
+\rho_0=\frac{1}{k\sqrt d}.
+$$
+
+<p>
+  A large \(k\) makes \(\rho_0\) tiny, so escape almost never fires and the run is effectively pure local
+  search (\(\to\) <code>none</code>, the right behavior on a unimodal funnel); a small \(k\) makes \(\rho_0\)
+  large, so escape fires often and the run behaves like an aggressive multi-basin search (\(\to\)
+  <code>switch</code>). The <strong>default is \(k=0.75\)</strong> (recommended range \(0.5\)–\(1.0\)), and
+  \(\rho_0\), the escape value's memory, and the distinctness radius are all derived (§5); nothing is
+  tuned. One knob now interpolates the whole axis, and it is the one axis a user usually touches.
+</p>
+
+<h3 id="reactive-head">The reactive scout: a \(k\)-controlled <em>dose</em>, reallocated by evidence</h3>
+
+<p>
+  The default scout, <code>reactive</code>, is the honest version of "adaptive escape". It is important to
+  state what it does <strong>not</strong> do: it does not detect a multi-basin landscape from local data.
+  That is impossible: a local surrogate has never sampled the far basin, so its data <em>cannot</em> reveal
+  one. Instead <code>reactive</code> always spends the derived base rate \(\rho_0\) set by \(k\) (a
+  principled, \(k\)-controlled dose of speculative escape), and lets the <em>outcome</em> of candidates it
+  has <em>already planted</em> modulate that spend. A running escape value \(E\in[0,1]\) rises when a
+  recently-worked candidate is both spatially distinct from the incumbent (by the derived novelty radius)
+  and competitive, and decays otherwise. The far-probe rate then interpolates from \(\rho_0\) at no evidence
+  up toward 1 as \(E\) saturates:
+</p>
+
+$$
+\Pr[\text{tick fires an escape at ask } t]=\rho_0+(1-\rho_0)\,E_t,\qquad
+E_t\in[0,1]\text{ driven by planted-candidate outcomes.}
+$$
+
+<p>
+  The base rate is the load-bearing term; the evidence value is a bounded reallocation on top of it, and the
+  expensive commitment (the focus burst), is armed only once \(E\) clears half the base rate, so a single
+  below-base blip cannot trigger one. The consequence is the useful diagonal behavior: on a genuinely
+  single-basin landscape no candidate ever proves distinct, \(E\) decays, and <code>reactive</code>
+  collapses to <code>none</code>; on a multi-basin landscape distinct competitive candidates keep appearing,
+  \(E\) ramps, and escape spend rises toward <code>switch</code>. Watch all of it happen below.
+</p>
+
+<div class="demo" id="demo-pg-sec">
+  <div class="demo-head">
+    <span class="demo-title">Many-basin playground</span>
+    <span class="demo-sub">2-D port of the benchmark family · brighter = better</span>
+  </div>
+  <div class="demo-body" id="demo-playground">
+    <div class="controls">
+      <span class="seg seg-strat">
+        <button data-strat="none">none</button>
+        <button data-strat="random">random</button>
+        <button data-strat="switch">switch</button>
+        <button data-strat="reactive" class="active">reactive</button>
+      </span>
+      <span class="ctl ctl-k-wrap"><label>escape_k</label><input type="range" class="ctl-k" min="0.25" max="1.5" step="0.05" value="0.75" /><span class="val ctl-k-val">0.75</span></span>
+      <span class="ctl"><label>mask</label>
+        <select class="sel-mask">
+          <option value="dense">dense</option>
+          <option value="hard" selected>hard</option>
+          <option value="soft">soft</option>
+        </select>
+      </span>
+      <button class="btn primary btn-play">▶ play</button>
+      <button class="btn btn-step">⏭ step</button>
+      <button class="btn btn-finish">⏩ finish run</button>
+      <button class="btn btn-reset">↺ reset</button>
+      <span class="ctl"><label>speed</label><input type="range" class="ctl-speed" min="1" max="20" step="1" value="6" /><span class="val ctl-speed-val">6×</span></span>
+      <span class="ctl"><label>seed</label><input type="number" class="ctl-seed" value="10" min="1" max="9999" /></span>
+      <button class="btn btn-newland">🎲 new landscape</button>
+      <button class="btn btn-compare">⊞ race all four</button>
+    </div>
+    <div class="pg-layout">
+      <div>
+        <div class="pg-single"><canvas class="pg-canvas demo-canvas"></canvas></div>
+        <div class="pg-compare pg-compare-grid" style="display:none">
+          <div class="pg-cell"><canvas class="demo-canvas"></canvas><span class="pg-cell-label">none</span><span class="pg-cell-best"></span></div>
+          <div class="pg-cell"><canvas class="demo-canvas"></canvas><span class="pg-cell-label">random</span><span class="pg-cell-best"></span></div>
+          <div class="pg-cell"><canvas class="demo-canvas"></canvas><span class="pg-cell-label">switch</span><span class="pg-cell-best"></span></div>
+          <div class="pg-cell"><canvas class="demo-canvas"></canvas><span class="pg-cell-label">reactive</span><span class="pg-cell-best"></span></div>
+        </div>
+        <div class="pg-legend">
+          <span><i style="background:#22d3ee"></i>local step</span>
+          <span><i style="background:#fbbf24"></i>far probe</span>
+          <span><i style="background:#c084fc"></i>focus burst</span>
+          <span><i style="background:#64748b"></i>warmup</span>
+          <span><i style="border:1.5px solid #22d3ee;border-radius:2px;background:none"></i>main region</span>
+          <span><i style="border:1.5px dashed #f472b6;border-radius:2px;background:none"></i>candidate</span>
+          <span><i style="border:1.5px dashed #34d399;border-radius:50%;background:none"></i>hidden core</span>
+          <span style="color:#e2e8f0">✕ start x₀</span>
+        </div>
+      </div>
+      <div class="pg-side">
+        <div class="pg-stats">
+          <div class="pg-stat st-evals"><div class="k">evaluations</div><div class="v">0 / 300</div></div>
+          <div class="pg-stat st-best"><div class="k">best f (regret)</div><div class="v">…</div></div>
+          <div class="pg-stat st-basins"><div class="k">basins visited</div><div class="v">0</div></div>
+          <div class="pg-stat st-core"><div class="k">narrow core</div><div class="v">not yet</div></div>
+        </div>
+        <div>
+          <div class="mini-title">best-so-far</div>
+          <canvas class="pg-spark demo-canvas"></canvas>
+        </div>
+        <div>
+          <div class="mini-title">event log</div>
+          <div class="pg-log"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="demo-caption">
+    A faithful 2-D miniature of the optimizer on a 2-D port of the many-basin benchmark family: every
+    constant here (warmup, box tolerances, scout cadence, novelty radius, focus window) is computed by the
+    same derivation rules as the real implementation, specialized to \(d=2\), \(q=4\), \(B=300\). The start
+    ✕ sits in an ordinary basin; two basins hide a bright narrow core. With <code>none</code>, watch
+    Proposition 1: the cyan box collapses into the start basin and nothing can ever leave. With
+    <code>random</code>, amber far probes fire every few asks but almost never land anywhere useful. With
+    <code>switch</code>, a promising candidate triggers a purple <em>focus burst</em>: three of the four
+    slots concentrate on it for a bounded window, which is what actually reaches a hidden core. The default
+    <code>reactive</code> runs the same machinery, but its escape rate starts at the derived base
+    \(\rho_0=1/(k\sqrt d)\) and grows only as planted candidates prove distinct; slide <em>escape_k</em>
+    down toward \(0.25\) to see it escape eagerly like <code>switch</code>, up toward \(1.5\) to see it stay
+    home like <code>none</code>. Try <em>race all four</em> on the same landscape and seed.
+  </div>
+</div>
+
+<h2 id="constants"><span class="sec-num">5</span>Where the constants come from</h2>
+
+<p>
+  The governing principle: compute everything from the prior information \((d,q,B,x_0)\) or from the
+  observed data; expose as a knob only a genuine choice. The derivations are arguments, not theorems, and
+  each comes with the reason it is the right rule. A selection:
+</p>
+
+$$
+\rho=\frac{1}{\sqrt d},\quad
+\ell_{\text{init}}=\ell_{\max}=1,\quad
+\ell_{\min}=\delta/8,\quad
+\texttt{fail\_tol}=\max\!\big(4,\lceil\sqrt d/q\rceil\big).
+$$
+
+<p>
+  <strong>Active fraction.</strong> Under the standard assumption that the active set of a hyperparameter
+  landscape grows like \(\sqrt d\), setting \(\rho d=\sqrt d\), i.e. \(\rho=1/\sqrt d\), matches the expected
+  number of moved coordinates to the active-set size: enough freedom to improve, few enough to keep steps
+  clean (Proposition 3). One derived value, no schedule and no clamp; an ablation confirms this flat form is
+  no worse (and slightly better) than the prototype's annealed, clamped version.
+  <strong>Trust region.</strong> The box side cannot exceed the cube side, so \(\ell_{\max}=1\); starting
+  there and letting failures shrink it means no initial size is chosen. The floor \(\ell_{\min}=\delta/8\) is
+  a resolution: below the novelty radius \(\delta\) the box can no longer separate a candidate.
+  <strong>Box patience.</strong> Each batch tests \(q\) of the region's \(\sqrt d\) effective directions, so
+  declaring the box too large should take about one failed batch per direction; the floor of 4 guards against
+  reacting to Thompson-sampling noise.
+</p>
+
+$$
+S_y=\max\!\big(\operatorname{IQR}(\mathbf y),\,1.4826\,\operatorname{MAD}(\mathbf y),\,\sigma_{\text{noise}},\,\epsilon\big),
+\qquad
+\delta\approx0.6\sqrt{1/6}\approx0.245.
+$$
+
+<p>
+  <strong>Scale-free gates.</strong> An absolute margin is meaningless across tasks whose scales differ by
+  orders of magnitude; dividing every gate by the robust scale \(S_y\) turns its coefficients into pure
+  numbers that transfer across tasks. <strong>Novelty radius.</strong> Two uniform points in \([0,1]^d\)
+  have per-coordinate RMS distance \(\sqrt{1/6}\approx0.408\) independent of \(d\); requiring 60% of that
+  typical distance makes "novel" mean materially separated, not merely numerically distinct.
+</p>
+
+<div class="algo">
+  <div class="algo-title">the full method, one ask/tell loop</div>
+  <pre>
+<span class="kw">input:</span>  mask m ∈ {dense, soft, hard, adaptive},  scout Σ ∈ {none, random, switch, reactive},
+        escape_k (default 0.75),  tr_update ∈ {batch, point},  problem (d, q, B),  optional x0, risk
+<span class="kw">derive:</span> n_init, pool N, max_data, ρ = 1/√d, ρ₀ = 1/(escape_k·√d), (ℓ_init, ℓ_min, ℓ_max),
+        succ_tol, fail_tol, scout period p, stag, max_regions, δ, focus window
+
+<span class="kw">while</span> |D| &lt; B:
+    S_y ← robust_scale(y)
+    <span class="kw">for</span> R in regions:  adapt_box(R)
+    <span class="kw">if</span> |D| &lt; n_init:  ask quasirandom warmup; tell; <span class="kw">continue</span>
+    batch, roles ← Σ.allocate(regions, q)          <span class="cm"># each slot: masked local TS, probe, or burst</span>
+    y ← f(batch);  D ← D ∪ (batch, y)
+    Σ.tell(batch, y, roles)                        <span class="cm"># promote / mine / focus / prune</span>
+<span class="kw">return</span> argmin over D</pre>
+</div>
+
+<p>
+  Three discrete choices remain, all regime declarations about the landscape that no prior or posterior can
+  decide: the mask \(m\) (Proposition 3 shows the right move depends on whether the space is isotropic),
+  the scout \(\Sigma\) (Proposition 1 versus the volume argument shows how much escape is warranted is
+  regime-dependent), and the <strong>trust-region update granularity</strong>: per-batch success/failure
+  counting (standard TuRBO) shrinks the box slowly and wins multimodal landscapes, per-point counting
+  shrinks up to \(q\) times faster and wins smooth convex valleys. Neither dominates, so it is a knob with
+  batch as the safe default. In practice the mask self-selects (the adaptive mask learns its concentration
+  online, §3), and the escape axis is a single continuous dial (§4): the default <code>reactive</code> scout
+  reads its base rate off <code>escape_k</code>, so the one thing a user usually touches is that one number.
+  The remaining surface is <code>budget</code>, a one-word <code>risk</code> level, and an optional value or
+  noise scale.
+</p>
+
+<h2 id="benchmarks"><span class="sec-num">6</span>What the benchmarks show</h2>
+
+<p>
+  The shipped default is the adaptive mask (§3) with the <code>reactive</code> scout at
+  <code>escape_k=0.75</code> and per-batch trust-region updates. Three suites ask three different questions.
+  The <strong>synthetic-general</strong> suite (eight smooth tasks: Hartmann6 \(d=6\); Ackley, Griewank,
+  Powell, Rastrigin, Levy, Rosenbrock, Styblinski-Tang at \(d=25\); budgets 120–200, \(q=4\), 6 seeds; lower
+  is better, ranked per task) asks whether the method beats prior work and whether the mask axis carries its
+  weight. The <strong>multi-basin</strong> suite asks what the escape axis buys where a local search is
+  genuinely trapped. And the <strong>real-HPO</strong> suite asks whether the default configuration wins on
+  landscapes that mix both. Every panel is one task at its own scale, ranked by that task's final value, one
+  color per method.
+</p>
+
+<h3>Against prior work (synthetic general)</h3>
+
+<p>
+  On the eight smooth general tasks the escape axis has nothing to escape, so the best S3-TuRBO variant is
+  <strong>pure-local <code>none</code></strong> (large-\(k\) behavior), with the default
+  <code>reactive</code> a close second, both ahead of every external baseline (TuRBO, CMA-ES, and the
+  global-GP methods GP-BO and HEBO, which collapse in 25 dimensions, and Sobol). This is the expected end of
+  the diagonal: on a unimodal funnel, spending any budget on escape is spending it on budget the local search
+  would otherwise use.
+</p>
+
+<div class="tbl-wrap">
+<table class="res">
+  <thead><tr><th>method</th><th>avg rank ↓</th></tr></thead>
+  <tbody>
+    <tr><td class="method-preset">S3-TuRBO · none (pure local)</td><td class="best">2.00</td></tr>
+    <tr><td class="method-preset">S3-TuRBO · reactive (default)</td><td>2.38</td></tr>
+    <tr><td>TuRBO</td><td>3.00</td></tr>
+    <tr><td>CMA-ES</td><td>3.63</td></tr>
+    <tr><td class="dim">GP-BO</td><td class="dim">5.13</td></tr>
+    <tr><td class="dim">HEBO</td><td class="dim">5.25</td></tr>
+    <tr><td class="dim">Sobol</td><td class="dim">6.63</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><img src="images/benchmark_comparison.png" alt="Synthetic-general benchmark: per-task best-so-far curves for S3-TuRBO (default reactive and pure-local none) against TuRBO, CMA-ES, GP-BO, HEBO and Sobol; the two S3-TuRBO lines lead on every smooth task while the global-GP methods collapse in 25 dimensions" style="width:100%;max-width:100%;border-radius:8px;margin:1rem 0"></p>
+
+<p>
+  Every panel draws two S3-TuRBO lines: pure-local <code>none</code> (grey) and the recommended
+  <code>reactive</code> escape at <code>escape_k=1</code> (black), against the external baselines. On the
+  smooth tasks the two nearly coincide, so the escape axis costs almost nothing; on the many-basin panel
+  <code>none</code> stays trapped with the local baselines while the escape reaches the deep core.
+  <code>switch</code> (the aggressive escape, purple) is shown too: worse on the smooth tasks, but it dives
+  to the core on many-basin. The escape axis pays off exactly on the task that needs it.
+</p>
+
+<h3>The mask axis (ablation)</h3>
+
+<p>
+  Holding the scout at <code>random</code> and the update at <code>batch</code> and varying only the mask
+  isolates the local-move contribution. Every mask beats the no-mask (dense) baseline (Proposition 3 in
+  practice), and the adaptive mask ranks best without being told the regime. The margin over the fixed masks
+  is narrow, so a matching fixed mask is an equally good choice when the regime is known; the fixed masks are
+  kept as reference configurations, not the recommended path.
+</p>
+
+<div class="tbl-wrap">
+<table class="res">
+  <thead><tr><th>mask</th><th>avg rank ↓</th></tr></thead>
+  <tbody>
+    <tr><td class="method-preset">adaptive</td><td class="best">1.78</td></tr>
+    <tr><td>hard</td><td>2.11</td></tr>
+    <tr><td>soft (fixed)</td><td>2.11</td></tr>
+    <tr><td class="dim">dense (no mask)</td><td class="dim">4.00</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><img src="images/benchmark_ablation.png" alt="Mask ablation: the no-mask dense baseline is clearly worst in every panel; adaptive, soft, hard cluster together" style="width:100%;max-width:100%;border-radius:8px;margin:1rem 0"></p>
+
+<h3>The scout axis (ablation)</h3>
+
+<p>
+  The escape axis only shows itself where a local search is genuinely <em>trapped</em>. The many-basin task
+  supplies that: the start basin is shallow, the deep basins sit far across a high plateau, and reaching one
+  needs a jump, not a walk. How hard that jump is depends on the basin width \(\sigma\), so sweeping easy
+  (\(0.40\)) → medium (\(0.30\)) → hard (\(0.20\)) turns escape from trivial into scout-only
+  (\(d=20\), budget 300, 16 seeds; core-hit = the incumbent ends in a deep core):
+</p>
+
+<div class="tbl-wrap">
+<table class="res">
+  <thead><tr><th>method</th><th>easy σ=0.40</th><th>medium σ=0.30</th><th>hard σ=0.20</th></tr></thead>
+  <tbody>
+    <tr><td class="method-preset">switch</td><td>0.001 / 100%</td><td class="best">0.005 / 100%</td><td class="best">0.007 / 100%</td></tr>
+    <tr><td>sidecar</td><td>0.002 / 100%</td><td>0.158 / 81%</td><td>0.500 / 0%</td></tr>
+    <tr><td>random</td><td>0.001 / 100%</td><td>0.174 / 81%</td><td>0.500 / 0%</td></tr>
+    <tr><td>none</td><td>0.001 / 100%</td><td>0.174 / 81%</td><td>0.500 / 0%</td></tr>
+    <tr><td class="dim">CMA-ES</td><td class="dim">0.017 / 100%</td><td class="dim">0.028 / 100%</td><td class="dim">0.092 / 94%</td></tr>
+    <tr><td class="dim">TuRBO</td><td class="dim">0.000 / 100%</td><td class="dim">0.094 / 81%</td><td class="dim">0.500 / 0%</td></tr>
+    <tr><td class="dim">GP-BO</td><td class="dim">0.075 / 100%</td><td class="dim">0.131 / 100%</td><td class="dim">0.286 / 100%</td></tr>
+    <tr><td class="dim">Sobol</td><td class="dim">0.184 / 100%</td><td class="dim">0.303 / 100%</td><td class="dim">0.495 / 31%</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  The gradient is the point. On <strong>easy</strong> every method reaches a core, even a plain local search,
+  because the basin is wide enough to fall into. On <strong>medium</strong> the strategies fan out: only
+  <code>switch</code> still solves it cleanly, the bounded <code>sidecar</code> side channel begins to help
+  over <code>none</code>, and the global samplers stay competitive. On <strong>hard</strong> only
+  <code>switch</code> crosses among the trust-region methods, matching the global samplers (CMA-ES, GP-BO)
+  that explore by construction and beating them on depth. The lighter scouts fire far probes but never
+  concentrate enough budget on one to descend a narrow far basin; only <code>switch</code>'s focus burst is
+  aggressive enough for the hard jump. So the scout's value is regime-dependent: <code>random</code> is cheap
+  coverage insurance, <code>switch</code> is the tool for hidden far cores, and the <code>escape_k</code>
+  dial lets the default <code>reactive</code> scout move continuously between the two.
+</p>
+
+<p><img src="images/scout_difficulty.png" alt="Many-basin escape across difficulty (easy/medium/hard by basin width): top row convergence per regime, bottom row core-hit rate; on easy everyone escapes, as basins narrow only switch and the global samplers still reach the core" style="width:100%;max-width:100%;border-radius:8px;margin:1rem 0"></p>
+
+<h3>The escape dial (k ablation)</h3>
+
+<p>
+  Sweeping <code>escape_k</code> alone, with everything else fixed, traces the whole escape axis with a
+  single number. A large \(k\) barely scouts and behaves like <code>none</code>; as \(k\) shrinks the base
+  rate \(\rho_0=1/(k\sqrt d)\) grows and escape becomes progressively more aggressive. On the multi-basin
+  family, <strong>smaller \(k\) escapes narrower cores</strong>: the harder the jump, the smaller the \(k\)
+  needed, and at \(k=0.1\) the dial matches discrete <code>switch</code> on the hardest core. The default
+  \(k=0.75\) sits in the middle of the recommended \(0.5\)–\(1.0\) band, escaping enough for mixed real
+  landscapes without over-exploring smooth ones.
+</p>
+
+<p><img src="images/k_ablation.png" alt="escape_k ablation on the multi-basin family: sweeping k alone spans the escape axis; smaller k reaches narrower hidden cores, and k around 0.1 matches the discrete switch scout on the hardest case while large k reduces to pure-local none" style="width:100%;max-width:100%;border-radius:8px;margin:1rem 0"></p>
+
+<h3>Real HPO tasks: the default wins</h3>
+
+<p>
+  The synthetic suites isolate mechanisms; real landscapes mix them. On genuine scikit-learn hyperparameter
+  search (SVC tuning on breast-cancer/wine/digits and an AutoML model-family search on digits/wine; 5 tasks,
+  5 seeds, budget 50; metric = validation error, lower is better), the default
+  <strong>reactive scout at <code>escape_k=0.75</code> ranks first overall (avg rank 1.80)</strong>, ahead of
+  pure-local <code>none</code> and every baseline. The AutoML model-family choice makes those landscapes
+  genuinely multi-basin, exactly the regime the escape axis is for; on the smooth SVC/breast-cancer landscape
+  the default reactive spend still tracks the pure-local best, because a redundant candidate lets its escape
+  value decay back toward <code>none</code>.
+</p>
+
+<div class="tbl-wrap">
+<table class="res">
+  <thead><tr><th>task</th><th class="method-preset">S3-TuRBO (reactive, k=0.75)</th><th class="method-preset">S3-TuRBO (none)</th><th>TuRBO</th><th>GP-BO</th><th>HEBO</th><th>CMA-ES</th><th>Sobol</th></tr></thead>
+  <tbody>
+    <tr><td>SVC / breast-cancer</td><td class="method-preset">0.00410</td><td class="best">0.00389</td><td class="dim">0.00426</td><td class="dim">0.00422</td><td class="dim">0.00421</td><td class="dim">0.00397</td><td class="dim">0.00447</td></tr>
+    <tr><td>SVC / wine</td><td class="best">0.00789</td><td class="method-preset">0.00900</td><td class="dim">0.01237</td><td class="dim">0.00898</td><td class="dim">0.01126</td><td class="dim">0.01011</td><td class="dim">0.01011</td></tr>
+    <tr><td>SVC / digits</td><td class="method-preset">0.00657</td><td class="method-preset">0.00690</td><td class="best">0.00634</td><td class="dim">0.00779</td><td class="dim">0.00712</td><td class="dim">0.00646</td><td class="dim">0.00768</td></tr>
+    <tr><td>AutoML / digits</td><td class="method-preset">0.00481</td><td class="method-preset">0.00519</td><td class="best">0.00444</td><td class="dim">0.00704</td><td class="dim">0.00778</td><td class="dim">0.00926</td><td class="dim">0.00815</td></tr>
+    <tr><td>AutoML / wine</td><td class="best">0.00000</td><td class="best">0.00000</td><td class="dim">0.00317</td><td class="dim">0.01270</td><td class="dim">0.00635</td><td class="dim">0.01587</td><td class="dim">0.00635</td></tr>
+    <tr class="rank-row"><td>avg rank ↓</td><td class="best">1.80</td><td>2.20</td><td>3.60</td><td>4.80</td><td>4.80</td><td>4.40</td><td>5.80</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><img src="images/benchmark_realhpo.png" alt="Real scikit-learn HPO: per-task best-so-far curves; the default S3-TuRBO reactive scout at escape_k=0.75 ranks first overall, ahead of pure-local none and every baseline" style="width:100%;max-width:100%;border-radius:8px;margin:1rem 0"></p>
+
+<h3>Three suites, one diagonal</h3>
+
+<p>
+  Reading the three suites together gives the whole story of the dial. Each suite is won at a different point
+  on the escape axis, and the default sits where the mixed real landscapes are:
+</p>
+
+<div class="tbl-wrap">
+<table class="res">
+  <thead><tr><th>suite</th><th>won at</th><th>why</th></tr></thead>
+  <tbody>
+    <tr><td>synthetic-general (8 smooth tasks)</td><td class="method-preset">large \(k\) → <code>none</code></td><td class="dim">unimodal funnels; escape only spends local budget</td></tr>
+    <tr><td>multi-basin (hidden narrow cores)</td><td class="method-preset">small \(k\) → <code>switch</code></td><td class="dim">only a concentrated burst descends a far core</td></tr>
+    <tr><td>real scikit-learn HPO (5 tasks)</td><td class="method-preset">\(k=0.75\) (default)</td><td class="dim">mixed landscapes; the middle of the dial ranks first</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>
+  No single point on the dial wins all three, which is exactly why the escape axis is a continuous knob and
+  not a fixed constant. The default \(k=0.75\) is chosen to win the suite that most resembles the target
+  application (real hyperparameter tuning) while staying a close second where pure-local is optimal.
+</p>
+
+
+<h2 id="presets"><span class="sec-num">7</span>Choosing a configuration</h2>
+
+<p>
+  The default is <code>adaptive · reactive · batch</code> at <code>escape_k=0.75</code>: the adaptive mask
+  self-selects, batch trust-region updates are the default, and the escape axis is the <code>reactive</code>
+  scout reading its base rate off <code>escape_k</code>. In the common case a user sets nothing at all, or at
+  most turns the single <code>escape_k</code> dial. The cards below are the useful settings of that one dial,
+  plus the discrete escape it interpolates between.
+</p>
+
+<div class="preset-grid">
+  <div class="preset-card">
+    <div class="pc-name"><span class="pc-dot" style="background:#111827"></span>reactive · k=0.75 <span class="pc-badge">default</span></div>
+    <div class="pc-axes">adaptive · reactive · batch · escape_k = 0.75</div>
+    <div class="pc-desc">The shipped default, and first on real HPO. It always spends the derived base rate ρ₀ = 1/(k·√d) and tracks an escape value E that a spatially-distinct-and-competitive candidate raises and a redundant one lowers, so on a single-basin landscape it decays to <code>none</code>, on a multi-basin one escape ramps up. It never predicts a far basin (a local search cannot).</div>
+  </div>
+  <div class="preset-card">
+    <div class="pc-name"><span class="pc-dot" style="background:#46c26b"></span>reactive · k=0.75–1.0 <span class="pc-badge">recommended</span></div>
+    <div class="pc-axes">adaptive · reactive · batch · escape_k ∈ [0.75, 1.0]</div>
+    <div class="pc-desc">Unknown regime, nothing known about the landscape: keep <code>escape_k</code> in the recommended 0.75–1.0 band. Larger k leans toward pure-local for smooth funnels; the default 0.75 is the all-round pick.</div>
+  </div>
+  <div class="preset-card">
+    <div class="pc-name"><span class="pc-dot" style="background:#4b9fd4"></span>reactive · k ≤ 0.5</div>
+    <div class="pc-axes">adaptive · reactive · batch · escape_k ≤ 0.5</div>
+    <div class="pc-desc">Known multi-family / multi-basin landscape: turn <code>escape_k</code> down to 0.5 or below to raise the base escape rate. Smaller k escapes narrower cores; near k = 0.1 the dial matches discrete <code>switch</code>.</div>
+  </div>
+  <div class="preset-card">
+    <div class="pc-name"><span class="pc-dot" style="background:#b388ff"></span>switch</div>
+    <div class="pc-axes">adaptive · switch · batch</div>
+    <div class="pc-desc">Hidden narrow cores you already know are there: the discrete <code>switch</code> scout commits the focus burst unconditionally. The only scout that survives the hardest jump, but it over-explores on smooth tasks, so use it only when the hidden-core regime is certain.</div>
+  </div>
+</div>
+
+<p>
+  The remaining scouts are reference points on the same axis: <code>none</code> is the large-\(k\) limit
+  (pure local, the behavior to beat on a smooth funnel), and <code>random</code> is a weak periodic far probe
+  kept as cheap coverage insurance. The fixed masks (<code>dense</code>, <code>hard</code>,
+  <code>soft</code>) and the legacy named presets (<code>balanced</code>, <code>rugged</code>, …) are kept as
+  static reference configurations for the ablation; pick one only when the regime is fully known and a
+  frozen setup is wanted.
+</p>
+
+<p>
+  Every result agrees on one point: a plain local trust-region search with no escape is the behavior to
+  beat, not the method to ship, for the heterogeneous many-basin regime, yet it <em>is</em> the right choice
+  when the landscape really is a single smooth funnel, which is exactly why the escape axis is a continuous
+  dial rather than an on/off switch. The default <code>reactive</code> scout at <code>escape_k=0.75</code>
+  sits where mixed real landscapes are best served, and decays to pure-local on its own when the evidence
+  says to.
+</p>
+
+<h2 id="limits"><span class="sec-num">8</span>Limits and open directions</h2>
+
+<p>
+  The switch advantage rests on a hard-case synthetic family and modest seed counts; it is a real effect on
+  its target metric, narrow-core hits, but "wins one regime" is not "wins in general," and only the former
+  is claimed. Selective moves are conditional by Proposition 3, which is why the move is an explicit axis
+  rather than a default. High observation noise degrades local and scout ranking, and broader-exploration
+  methods can overtake; a noise-aware variant (duplicate-based noise detection gating repeated confirmation)
+  is designed but not adopted, because always-on confirmation hurts the clean case. Vector-valued
+  multi-objective scouting is a promising but unfinished extension. Two directions are open research:
+  switching the move or scout <em>during</em> a run as the landscape reveals itself, and selecting the
+  initial configuration automatically from cheap early probes.
+</p>
+
+<hr class="sep" />
+
+<h2 id="citation">Citation</h2>
+
+<p>If this method or page is useful in your work, please cite:</p>
+
+<div class="cite-block" id="bibtex">@misc{kohaku2026s3turbo,
+  title  = {Soft-Sparse Scout TuRBO: Trust-Region Thompson Sampling
+            with Orthogonal Move and Escape Axes},
+  author = {BlueLeaf, Kohaku},
+  year   = {2026},
+  note   = {Project page, interactive demos and benchmarks}
+}<button class="btn copy-btn" id="btn-copy-cite">copy</button></div>
+
+<p style="margin-top:22px; font-size:14.5px; color:var(--muted)">
+  <strong>Related reading.</strong> TuRBO: Eriksson, Pearce, Gardner, Turner, Poloczek,
+  <em>Scalable Global Optimization via Local Bayesian Optimization</em>, NeurIPS 2019. Thompson sampling:
+  Thompson 1933; Russo et al., <em>A Tutorial on Thompson Sampling</em>, 2018. HEBO: Cowen-Rivers et al.,
+  2022. CMA-ES: Hansen and Ostermeier, 2001.
+</p>
+
+</article>
+</div>
+
+<footer class="site-footer">
+  <div>Soft-Sparse Scout TuRBO · <a href="https://github.com/KohakuBlueleaf" target="_blank" rel="noopener">Kohaku BlueLeaf</a> · 2026</div>
+  <div style="margin-top:6px">Static page, no tracking. Demos run entirely in your browser.</div>
+</footer>
+
+<script src="vendor/katex/katex.min.js"></script>
+<script src="vendor/katex/auto-render.min.js"></script>
+<script src="js/common.js"></script>
+<script src="js/main.js"></script>
+<script src="js/demo-ts.js"></script>
+<script src="js/demo-mask.js"></script>
+<script src="js/demo-adaptive.js"></script>
+<script src="js/demo-playground.js"></script>
+</body>
+</html>
