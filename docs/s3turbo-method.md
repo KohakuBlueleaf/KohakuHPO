@@ -221,8 +221,7 @@ Read the table top to bottom as the argument.
 
 **none → the escape floor.** With no scout, Proposition 1 makes distant basins unreachable. Any positive scout rate fixes this:
 
-> **Proposition 4 (escape floor).** Let $\mu_t$ be the probability a scout slot at ask $t$ lands in $\bigcup_k B_k$, and $\rho_t$ the fraction of ask-$t$ slots that are scout slots. Then
-> $$\Pr[\text{some scout reaches a useful basin by ask }T]\ \ge\ 1-\prod_{t=1}^{T}(1-\rho_t\mu_t).$$
+> **Proposition 4 (escape floor).** Let $\mu_t$ be the probability a scout slot at ask $t$ lands in $\bigcup_k B_k$, and $\rho_t$ the fraction of ask-$t$ slots that are scout slots. Then $\Pr[\text{some scout reaches a useful basin by ask }T]\ \ge\ 1-\prod_{t=1}^{T}(1-\rho_t\mu_t)$.
 > For $\Sigma=\textsf{none}$, $\rho_t\equiv0$ and the bound is $0$, consistent with Proposition 1. For any strategy with $\rho_t>0$ the floor is strictly positive and tends to $1$ as $T\to\infty$ whenever $\inf_t\mu_t>0$.
 >
 > *Proof.* The complementary event "no scout ever lands" factorizes across ticks with per-ask non-landing probability at most $1-\rho_t\mu_t$; take the product and complement. $\square$
